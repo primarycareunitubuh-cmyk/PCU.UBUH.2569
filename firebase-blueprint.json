@@ -1,0 +1,102 @@
+{
+  "entities": {
+    "Assessment": {
+      "title": "Assessment",
+      "description": "Primary Care Quality Standards Assessment for year 2026",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique ID of the assessment, typically the sanitized email"
+        },
+        "unitEmail": {
+          "type": "string",
+          "description": "Email address of the primary care unit"
+        },
+        "unitName": {
+          "type": "string",
+          "description": "Name of the primary care service center/unit"
+        },
+        "district": {
+          "type": "string",
+          "description": "District (Amphoe) of the unit"
+        },
+        "province": {
+          "type": "string",
+          "description": "Province (Changwat) of the unit"
+        },
+        "scores": {
+          "type": "object",
+          "description": "Map of item identifiers to scored values"
+        },
+        "notes": {
+          "type": "object",
+          "description": "Map of item identifiers to notes or evidence notes"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of the last update"
+        }
+      },
+      "required": [
+        "id",
+        "unitEmail",
+        "unitName"
+      ]
+    },
+    "EvidenceFile": {
+      "title": "EvidenceFile",
+      "description": "Document evidence attached to a specific assessment item/standard",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique file ID"
+        },
+        "itemId": {
+          "type": "string",
+          "description": "Standard identifier (e.g. s1_1.1, s5_2.1)"
+        },
+        "name": {
+          "type": "string",
+          "description": "Original file name"
+        },
+        "type": {
+          "type": "string",
+          "description": "MIME type (e.g., application/pdf, image/png)"
+        },
+        "size": {
+          "type": "number",
+          "description": "Size in bytes"
+        },
+        "data": {
+          "type": "string",
+          "description": "Base64 data representation"
+        },
+        "uploadedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Date of upload"
+        }
+      },
+      "required": [
+        "id",
+        "itemId",
+        "name",
+        "type",
+        "data"
+      ]
+    }
+  },
+  "firestore": {
+    "/assessments/{assessmentId}": {
+      "schema": "Assessment",
+      "description": "Firestore collection storing unit quality assessments"
+    },
+    "/assessments/{assessmentId}/files/{fileId}": {
+      "schema": "EvidenceFile",
+      "description": "Subcollection storing attached PDF, Word, and Image files for the assessment"
+    }
+  }
+}
