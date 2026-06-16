@@ -586,8 +586,15 @@ export default function App() {
                   เกณฑ์รอบปี พ.ศ. 2568 - 2570
                 </span>
                 <span className="text-[11px] text-teal-700 font-bold bg-teal-50 border border-teal-100/50 px-4 py-1.5 rounded-full">
-                  โรงพยาบาลมหาวิทยาลัยอุบลราชธานี {(currentUserInfo?.email === 'primarycareunit.ubuh@ubu.ac.th' || currentUserInfo?.role === 'admin') && ' (ผู้ดูแลระบบสูงสุด 👑)'}
+                  โรงพยาบาลมหาวิทยาลัยอุบลราชธานี
                 </span>
+                {currentUserInfo && (
+                  <span className="text-[11px] text-emerald-800 font-extrabold bg-emerald-50 border border-emerald-100 px-4 py-1.5 rounded-full flex items-center gap-1.5 animate-fade-in">
+                    <User className="h-3.5 w-3.5 text-emerald-600" />
+                    <span>ผู้ใช้งานระบบ: {currentUserInfo.displayName || currentUserInfo.name}</span>
+                    {(currentUserInfo.email === 'primarycareunit.ubuh@ubu.ac.th' || currentUserInfo.role === 'admin') && <span className="text-purple-600 font-black ml-1">(ผู้ดูแลระบบสูงสุด 👑)</span>}
+                  </span>
+                )}
                 {sessionRole === 'supervisor' && (
                   <span className="text-[11px] text-indigo-700 font-bold bg-indigo-50 border border-indigo-100 px-4 py-1.5 rounded-full flex items-center gap-1">
                     <ShieldCheck className="h-3 w-3" />

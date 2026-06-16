@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Database, ShieldCheck, Mail, Building, Eye, Users, Lock, LogIn } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { auth, db } from '../firebase';
+import { auth, db, firebaseConfig } from '../firebase';
 import { GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
 import { collection, query, where, getDocs } from 'firebase/firestore';
 import { HOSPITAL_LOGO_BASE64 } from '../config';
@@ -35,10 +35,6 @@ export default function AuthModal({ onConfirm, isLoading, externalError }: AuthM
 
   const handleGoogleSignIn = async () => {
     setError('');
-    if (!name.trim()) {
-      setError('กรุณากรอกข้อมูลชื่อหน่วยงาน/เครือข่ายปฐมภูมิก่อนดำเนินการเข้าสู่ระบบ');
-      return;
-    }
 
     setIsGoogleLoading(true);
     const provider = new GoogleAuthProvider();
@@ -70,15 +66,29 @@ export default function AuthModal({ onConfirm, isLoading, externalError }: AuthM
       onConfirm({ 
         email: user.email!, 
         displayName: user.displayName || undefined,
-        name: name.trim() || 'โรงพยาบาลมหาวิทยาลัยอุบลราชธานี', // fallback default
+        name: user.displayName || user.email || 'ผู้ใช้สหสาขา', 
         district: '', 
         province: '',
         role: assignedRole
       });
     } catch (err: any) {
       console.error(err);
-      if (err.code === 'auth/unauthorized-domain' || String(err.message).includes('unauthorized-domain')) {
-        setError('เกิดข้อผิดพลาดในการรับรองโดเมน (auth/unauthorized-domain) เนื่องจากเซสชันถูกบล็อกภายใน iFrame แนะนำให้กดปุ่ม "เปิดระบบในแท็บใหม่" สีส้มอ่อนเพื่อหลีกเลี่ยงกฎความปลอดภัยของเบราว์เซอร์');
+      const isUnauthDomain = err.code === 'auth/unauthorized-domain' || 
+                             (err.message && err.message.toLowerCase().includes('unauthorized-domain'));
+      
+      if (isUnauthDomain) {
+        setError(
+          `⚠️ โดเมนของเว็บไซต์นี้ (${window.location.hostname}) ยังไม่ได้รับการอนุญาตในระบบเข้าสู่ระบบด้วย Google ของคุณ\n\n` +
+          `กรุณาทำตามขั้นตอนต่อไปนี้เพื่อให้สามารถเข้าสู่ระบบได้:\n` +
+          `1. ไปที่ Firebase Console ที่โครงการของคุณ\n` +
+          `   (โปรเจกต์ ID: ${firebaseConfig.projectId || 'gen-lang-client-0187057948'})\n` +
+          `2. ไปที่เมนู Authentication > แท็บ Settings > หัวข้อ Authorized domains (โดเมนที่ได้รับอนุญาต)\n` +
+          `3. คลิกปุ่ม "Add domain" (เพิ่มโดเมน)\n` +
+          `4. พิมพ์หรือวางโดเมนนี้ลงไป:\n` +
+          `👉   ${window.location.hostname}\n` +
+          `5. คลิก "Add" (เพิ่ม) เพื่อบันทึกค่า\n\n` +
+          `หลังจากบันทึกแล้ว กรุณาเปิดหรือรีเฟรชหน้าเว็บนี้เพื่อเข้าสู่ระบบปฐมภูมิใหม่อีกครั้ง!`
+        );
       } else {
         setError('เกิดข้อผิดพลาดในการเข้าสู่ระบบด้วยบัญชี Google: ' + err.message);
       }
@@ -86,8 +96,6 @@ export default function AuthModal({ onConfirm, isLoading, externalError }: AuthM
       setIsGoogleLoading(false);
     }
   };
-
-  const isInIframe = typeof window !== 'undefined' && window.self !== window.top;
 
   const handleSubmitSupervisor = (e: React.FormEvent) => {
     e.preventDefault();
@@ -228,44 +236,16 @@ export default function AuthModal({ onConfirm, isLoading, externalError }: AuthM
 
                 {activeTab === 'editor' ? (
                   <div className="space-y-4">
-                    <div>
-                      <label className="block text-[13px] font-bold text-slate-700 mb-2 flex items-center gap-1.5 ml-2">
-                        <Building className="h-4 w-4 text-slate-400" /> ชื่อหน่วยงาน / เครือข่ายปฐมภูมิ
-                      </label>
-                      <input
-                        type="text"
-                        value={name}
-                        onChange={(e) => setName(e.target.value)}
-                        placeholder="ระบุชื่อรพ.สต. หรือหน่วยงานสุขภาพปฐมภูมิ"
-                        className="w-full text-[15px] rounded-full border border-slate-200 px-6 py-3.5 bg-slate-50 hover:bg-slate-100/50 focus:bg-white focus:border-teal-400 focus:ring-4 focus:ring-teal-500/10 transition-all outline-none font-semibold text-slate-700 placeholder:text-slate-400 shadow-sm"
-                      />
+                    <div className="bg-teal-50/50 rounded-[1.5rem] p-5 border border-teal-100/40 text-center font-sans space-y-2">
+                      <p className="text-sm font-extrabold text-teal-800">🏥 ระบบบันทึกข้อมูลส่วนกลาง</p>
+                      <p className="text-xs text-slate-500 leading-relaxed font-semibold">
+                        บัญชีที่ได้รับการอนุมัติสามารถล็อกอินด้วย Google Account เพื่อร่วมประเมินและแนบเกณฑ์มาตรฐานพัฒนาคุณภาพปฐมภูมิร่วมกันได้โดยตรงบนฐานข้อมูลกลาง
+                      </p>
                     </div>
 
                     {(error || externalError) && (
-                      <motion.div initial={{opacity:0, scale:0.95}} animate={{opacity:1, scale:1}} className="rounded-3xl bg-rose-50 p-4 px-6 border border-rose-100/50 text-[13px] font-bold text-rose-600 font-sans leading-relaxed">
-                        ⚠️ {error || externalError}
-                      </motion.div>
-                    )}
-
-                    {isInIframe && (
-                      <motion.div 
-                        initial={{ opacity: 0, y: 10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        className="rounded-2xl bg-amber-50/90 p-4 border border-amber-200/60 text-xs font-semibold text-amber-800 font-sans leading-relaxed space-y-2.5"
-                      >
-                        <p className="font-bold text-amber-900 text-[13px] flex items-center gap-1.5">
-                          ⚠️ แจ้งเตือน: ตรวจพบการทำงานใต้ iFrame
-                        </p>
-                        <p className="text-[11.5px] font-medium text-amber-800/90 leading-relaxed">
-                          เนื่องจากนโยบายความปลอดภัยและคุกกี้บุคคลที่สาม (Third-party Cookies) ของเบราว์เซอร์ การล็อกอินผ่าน iFrame ของ AI Studio จะเกิดข้อผิดพลาด <strong>auth/unauthorized-domain</strong> เสมอ
-                        </p>
-                        <button
-                          type="button"
-                          onClick={() => window.open(window.location.href, '_blank')}
-                          className="w-full inline-flex items-center justify-center gap-2 py-2.5 px-4 bg-amber-600 hover:bg-amber-700 active:bg-amber-800 text-white text-xs font-bold rounded-full transition-all cursor-pointer shadow-sm hover:shadow"
-                        >
-                          🚀 คลิกเปิดแท็บใหม่เพื่อเข้าสู่ระบบที่ปลอดภัย (แนะนำ)
-                        </button>
+                      <motion.div initial={{opacity:0, scale:0.95}} animate={{opacity:1, scale:1}} className="rounded-[1.5rem] bg-rose-50 p-5 px-6 border border-rose-100/50 text-[13px] font-bold text-rose-600 font-sans leading-relaxed whitespace-pre-line text-left">
+                        {error || externalError}
                       </motion.div>
                     )}
 
@@ -314,8 +294,8 @@ export default function AuthModal({ onConfirm, isLoading, externalError }: AuthM
                     </div>
 
                     {(error || externalError) && (
-                      <motion.div initial={{opacity:0, scale:0.95}} animate={{opacity:1, scale:1}} className="rounded-3xl bg-rose-50 p-4 px-6 border border-rose-100/50 text-[13px] font-bold text-rose-600 font-sans leading-relaxed">
-                        ⚠️ {error || externalError}
+                      <motion.div initial={{opacity:0, scale:0.95}} animate={{opacity:1, scale:1}} className="rounded-[1.5rem] bg-rose-50 p-5 px-6 border border-rose-100/50 text-[13px] font-bold text-rose-600 font-sans leading-relaxed whitespace-pre-line text-left">
+                        {error || externalError}
                       </motion.div>
                     )}
 
