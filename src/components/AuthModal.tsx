@@ -77,11 +77,17 @@ export default function AuthModal({ onConfirm, isLoading, externalError }: AuthM
       });
     } catch (err: any) {
       console.error(err);
-      setError('เกิดข้อผิดพลาดในการเข้าสู่ระบบด้วยบัญชี Google: ' + err.message);
+      if (err.code === 'auth/unauthorized-domain' || String(err.message).includes('unauthorized-domain')) {
+        setError('เกิดข้อผิดพลาดในการรับรองโดเมน (auth/unauthorized-domain) เนื่องจากเซสชันถูกบล็อกภายใน iFrame แนะนำให้กดปุ่ม "เปิดระบบในแท็บใหม่" สีส้มอ่อนเพื่อหลีกเลี่ยงกฎความปลอดภัยของเบราว์เซอร์');
+      } else {
+        setError('เกิดข้อผิดพลาดในการเข้าสู่ระบบด้วยบัญชี Google: ' + err.message);
+      }
     } finally {
       setIsGoogleLoading(false);
     }
   };
+
+  const isInIframe = typeof window !== 'undefined' && window.self !== window.top;
 
   const handleSubmitSupervisor = (e: React.FormEvent) => {
     e.preventDefault();
@@ -238,6 +244,28 @@ export default function AuthModal({ onConfirm, isLoading, externalError }: AuthM
                     {(error || externalError) && (
                       <motion.div initial={{opacity:0, scale:0.95}} animate={{opacity:1, scale:1}} className="rounded-3xl bg-rose-50 p-4 px-6 border border-rose-100/50 text-[13px] font-bold text-rose-600 font-sans leading-relaxed">
                         ⚠️ {error || externalError}
+                      </motion.div>
+                    )}
+
+                    {isInIframe && (
+                      <motion.div 
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="rounded-2xl bg-amber-50/90 p-4 border border-amber-200/60 text-xs font-semibold text-amber-800 font-sans leading-relaxed space-y-2.5"
+                      >
+                        <p className="font-bold text-amber-900 text-[13px] flex items-center gap-1.5">
+                          ⚠️ แจ้งเตือน: ตรวจพบการทำงานใต้ iFrame
+                        </p>
+                        <p className="text-[11.5px] font-medium text-amber-800/90 leading-relaxed">
+                          เนื่องจากนโยบายความปลอดภัยและคุกกี้บุคคลที่สาม (Third-party Cookies) ของเบราว์เซอร์ การล็อกอินผ่าน iFrame ของ AI Studio จะเกิดข้อผิดพลาด <strong>auth/unauthorized-domain</strong> เสมอ
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => window.open(window.location.href, '_blank')}
+                          className="w-full inline-flex items-center justify-center gap-2 py-2.5 px-4 bg-amber-600 hover:bg-amber-700 active:bg-amber-800 text-white text-xs font-bold rounded-full transition-all cursor-pointer shadow-sm hover:shadow"
+                        >
+                          🚀 คลิกเปิดแท็บใหม่เพื่อเข้าสู่ระบบที่ปลอดภัย (แนะนำ)
+                        </button>
                       </motion.div>
                     )}
 
