@@ -13,7 +13,20 @@ service cloud.firestore {
       // Embedded Evidence Files subcollection
       match /files/{fileId} {
         allow read, write: if true;
+        match /{allChildren=**} {
+          allow read, write: if true;
+        }
       }
+    }
+
+    // Authorized Users collection
+    match /authorized_users/{userId} {
+      allow read, write: if true;
+    }
+
+    // Activity logs collection for audit trail
+    match /activity_logs/{logId} {
+      allow read, write: if true;
     }
   }
 }

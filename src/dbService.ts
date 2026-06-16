@@ -87,7 +87,7 @@ export async function getAllAssessments(): Promise<AssessmentData[]> {
 }
 
 /**
- * Saves an evidence file in the subcollection of an assessment
+ * Saves an evidence file in the subcollection of an assessment with chunking support
  */
 export async function uploadEvidenceFile(
   assessmentId: string, 
@@ -100,25 +100,39 @@ export async function uploadEvidenceFile(
   const fileId = `${itemId}_${Date.now()}`;
   const fileRef = doc(db, 'assessments', assessmentId, 'files', fileId);
   
-  const fileDoc: EvidenceFileData = {
+  // Create File Metadata Document (Omit heavy 'data' field to keep it under 1MB)
+  const fileDocMeta = {
     id: fileId,
     itemId,
     name,
     type,
     size,
-    data: base64Data,
     uploadedAt: new Date().toISOString()
   };
 
   try {
-    await setDoc(fileRef, fileDoc);
+    // 1. Write the metadata document first
+    await setDoc(fileRef, fileDocMeta);
+
+    // 2. Chop base64Data into chunks and save them in parallel
+    const chunkSize = 500 * 1024; // 500KB chunks
+    const uploadPromises: Promise<void>[] = [];
+    
+    for (let i = 0; i < base64Data.length; i += chunkSize) {
+      const chunkStr = base64Data.substring(i, i + chunkSize);
+      const chunkIndex = Math.floor(i / chunkSize);
+      const chunkRef = doc(db, 'assessments', assessmentId, 'files', fileId, 'chunks', String(chunkIndex));
+      
+      uploadPromises.push(setDoc(chunkRef, {
+        index: chunkIndex,
+        data: chunkStr
+      }));
+    }
+
+    await Promise.all(uploadPromises);
+
     return {
-      id: fileId,
-      itemId,
-      name,
-      type,
-      size,
-      uploadedAt: fileDoc.uploadedAt
+      ...fileDocMeta
     };
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `assessments/${assessmentId}/files/${fileId}`);
@@ -127,14 +141,48 @@ export async function uploadEvidenceFile(
 }
 
 /**
- * Retreives full file details (including Base64) to trigger downlads/previews
+ * Retreives full file details (including Base64) to trigger downloads/previews
  */
 export async function getEvidenceFileContent(assessmentId: string, fileId: string): Promise<EvidenceFileData | null> {
   const fileRef = doc(db, 'assessments', assessmentId, 'files', fileId);
   try {
     const docSnap = await getDoc(fileRef);
     if (docSnap.exists()) {
-      return docSnap.data() as EvidenceFileData;
+      const fileData = docSnap.data() as Record<string, any>;
+      
+      // Backward compatibility: If file was uploaded with old code where 'data' is a direct string:
+      if (typeof fileData.data === 'string' && fileData.data) {
+        return fileData as EvidenceFileData;
+      }
+      
+      // Fetch and assemble the chunks
+      const chunksColRef = collection(db, 'assessments', assessmentId, 'files', fileId, 'chunks');
+      const chunkSnaps = await getDocs(chunksColRef);
+      const chunksList: { index: number; data: string }[] = [];
+      
+      chunkSnaps.forEach(snap => {
+        const cData = snap.data();
+        if (cData && typeof cData.index === 'number' && typeof cData.data === 'string') {
+          chunksList.push({
+            index: cData.index,
+            data: cData.data
+          });
+        }
+      });
+      
+      // Sort and stitch chunks
+      chunksList.sort((a, b) => a.index - b.index);
+      const fullBase64 = chunksList.map(c => c.data).join('');
+      
+      return {
+        id: fileData.id,
+        itemId: fileData.itemId,
+        name: fileData.name,
+        type: fileData.type,
+        size: fileData.size,
+        uploadedAt: fileData.uploadedAt,
+        data: fullBase64
+      } as EvidenceFileData;
     }
     return null;
   } catch (error) {
@@ -171,13 +219,90 @@ export async function getEvidenceFileList(assessmentId: string): Promise<Evidenc
 }
 
 /**
- * Deletes a file document by ID
+ * Deletes a file document by ID and cleans up its chunk subcolleciton
  */
 export async function deleteEvidenceFile(assessmentId: string, fileId: string): Promise<void> {
   const fileRef = doc(db, 'assessments', assessmentId, 'files', fileId);
   try {
+    // 1. Delete parent document
     await deleteDoc(fileRef);
+    
+    // 2. Fetch and delete all chunks in its subcollection
+    const chunksColRef = collection(db, 'assessments', assessmentId, 'files', fileId, 'chunks');
+    const chunkSnaps = await getDocs(chunksColRef);
+    const deletePromises: Promise<void>[] = [];
+    
+    chunkSnaps.forEach(snap => {
+      deletePromises.push(deleteDoc(snap.ref));
+    });
+    
+    await Promise.all(deletePromises);
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `assessments/${assessmentId}/files/${fileId}`);
+  }
+}
+
+export interface ActivityLog {
+  id: string;
+  userEmail: string;
+  userDisplayName?: string;
+  unitName: string;
+  action: 'edit_evaluation' | 'upload_file' | 'delete_file';
+  itemId?: string;
+  itemCode?: string;
+  itemName?: string;
+  details: string;
+  timestamp: string;
+}
+
+/**
+ * Records an activity log inside Firestore for edit history auditing
+ */
+export async function logActivity(
+  userEmail: string,
+  userDisplayName: string | undefined,
+  unitName: string,
+  action: 'edit_evaluation' | 'upload_file' | 'delete_file',
+  details: string,
+  itemId?: string,
+  itemCode?: string,
+  itemName?: string
+): Promise<void> {
+  const logId = `log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const logRef = doc(db, 'activity_logs', logId);
+  const logData: ActivityLog = {
+    id: logId,
+    userEmail,
+    userDisplayName,
+    unitName,
+    action,
+    details,
+    itemId,
+    itemCode,
+    itemName,
+    timestamp: new Date().toISOString()
+  };
+  try {
+    await setDoc(logRef, logData);
+  } catch (error) {
+    console.error("Failed to log activity:", error);
+  }
+}
+
+/**
+ * Retrieves all activity logs ordered by timestamp descending
+ */
+export async function getActivityLogs(): Promise<ActivityLog[]> {
+  const colRef = collection(db, 'activity_logs');
+  try {
+    const qSnap = await getDocs(colRef);
+    const list: ActivityLog[] = [];
+    qSnap.forEach(docSnap => {
+      list.push(docSnap.data() as ActivityLog);
+    });
+    return list.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'activity_logs');
+    return [];
   }
 }

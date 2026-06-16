@@ -87,6 +87,57 @@
         "type",
         "data"
       ]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "Trail of changes and modifications made by uploaders in the system",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique log identifier"
+        },
+        "userEmail": {
+          "type": "string",
+          "description": "Email address of the user who performed the action"
+        },
+        "unitName": {
+          "type": "string",
+          "description": "Name of the service unit where the edit happened"
+        },
+        "action": {
+          "type": "string",
+          "description": "Category of the action: e.g. edit_evaluation, upload_file, delete_file"
+        },
+        "itemId": {
+          "type": "string",
+          "description": "The item / standard identifier affected"
+        },
+        "itemCode": {
+          "type": "string",
+          "description": "Code of the item"
+        },
+        "itemName": {
+          "type": "string",
+          "description": "Name of the item"
+        },
+        "details": {
+          "type": "string",
+          "description": "Detailed text describing the modification"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp of when the action occurred"
+        }
+      },
+      "required": [
+        "id",
+        "userEmail",
+        "action",
+        "details",
+        "timestamp"
+      ]
     }
   },
   "firestore": {
@@ -97,6 +148,10 @@
     "/assessments/{assessmentId}/files/{fileId}": {
       "schema": "EvidenceFile",
       "description": "Subcollection storing attached PDF, Word, and Image files for the assessment"
+    },
+    "/activity_logs/{logId}": {
+      "schema": "ActivityLog",
+      "description": "Collection tracking editing history and audit logs"
     }
   }
 }

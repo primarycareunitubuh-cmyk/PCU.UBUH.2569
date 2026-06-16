@@ -13,7 +13,14 @@ import {
   Printer,
   Sparkles,
   Award,
-  CircleAlert
+  CircleAlert,
+  History,
+  UserCheck,
+  Clock,
+  User,
+  ShieldCheck,
+  Building,
+  MessageSquare
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
@@ -30,10 +37,24 @@ import {
   getAllAssessments,
   getEvidenceFileList, 
   AssessmentData, 
-  EvidenceFileMeta 
+  EvidenceFileMeta,
+  getActivityLogs,
+  logActivity,
+  ActivityLog
 } from './dbService';
 import AuthModal from './components/AuthModal';
+import { HOSPITAL_LOGO_BASE64 } from './config';
 import ItemEvaluationModal from './components/ItemEvaluationModal';
+import UserManagementModal from './components/UserManagementModal';
+import { 
+  collection, 
+  doc, 
+  onSnapshot, 
+  query 
+} from 'firebase/firestore';
+import { db } from './firebase';
+
+import HistoryModal from './components/HistoryModal';
 
 export default function App() {
   // Session UI states
@@ -42,8 +63,36 @@ export default function App() {
   const [evidenceFiles, setEvidenceFiles] = useState<EvidenceFileMeta[]>([]);
   
   // Dual-role states
-  const [sessionRole, setSessionRole] = useState<'editor' | 'supervisor'>('editor');
+  const [sessionRole, setSessionRole] = useState<'editor' | 'supervisor' | 'admin'>('editor');
   const [allUnitsList, setAllUnitsList] = useState<AssessmentData[]>([]);
+
+  // User info and logging states
+  const [currentUserInfo, setCurrentUserInfo] = useState<{
+    email: string;
+    displayName?: string;
+    name: string;
+    role: 'editor' | 'supervisor' | 'admin';
+  } | null>(null);
+
+  const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [logSearchTerm, setLogSearchTerm] = useState('');
+  const [logActionFilter, setLogActionFilter] = useState<'all' | 'edit_evaluation' | 'upload_file' | 'delete_file'>('all');
+
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [showUserManagement, setShowUserManagement] = useState(false);
+
+  const reloadActivityLogs = async () => {
+    try {
+      setLogsLoading(true);
+      const logs = await getActivityLogs();
+      setActivityLogs(logs);
+    } catch (err) {
+      console.error("Failed to load activity logs:", err);
+    } finally {
+      setLogsLoading(false);
+    }
+  };
 
   // Selection/Evaluation states
   const [selectedPart, setSelectedPart] = useState<number>(1);
@@ -53,6 +102,129 @@ export default function App() {
   // Sync status
   const [cloudStatus, setCloudStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle');
   const [authError, setAuthError] = useState<string>('');
+  const [logoutConfirm, setLogoutConfirm] = useState(false);
+
+  // 1. Subscribe to all assessments (supervisor/guest view) - Restricted to the single unified hospital dataset
+  useEffect(() => {
+    if (!currentUserInfo || sessionRole !== 'supervisor') {
+      return;
+    }
+    
+    const colRef = collection(db, 'assessments');
+    const unsubscribe = onSnapshot(colRef, (snapshot) => {
+      const list: AssessmentData[] = [];
+      snapshot.forEach(docSnap => {
+        const data = docSnap.data() as AssessmentData;
+        if (data.id === 'primarycareunit_ubuh_ubu_ac_th') {
+          list.push(data);
+        }
+      });
+      if (list.length === 0) {
+        list.push({
+          id: 'primarycareunit_ubuh_ubu_ac_th',
+          unitEmail: 'primarycareunit.ubuh@ubu.ac.th',
+          unitName: 'โรงพยาบาลมหาวิทยาลัยอุบลราชธานี',
+          district: 'วารินชำราบ',
+          province: 'อุบลราชธานี',
+          scores: {},
+          notes: {},
+          updatedAt: new Date().toISOString()
+        });
+      }
+      setAllUnitsList(list);
+    }, (error) => {
+      console.error("Realtime assessments sync error:", error);
+    });
+
+    return () => unsubscribe();
+  }, [currentUserInfo, sessionRole]);
+
+  // 2. Subscribe to active assessment document
+  useEffect(() => {
+    if (!currentUserInfo || !activeUnit || !activeUnit.id || activeUnit.id === 'no_data') {
+      return;
+    }
+
+    const docId = activeUnit.id;
+    const docRef = doc(db, 'assessments', docId);
+    
+    const unsubscribe = onSnapshot(docRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const updatedData = docSnap.data() as AssessmentData;
+        
+        setActiveUnit((prevActive) => {
+          if (!prevActive) return updatedData;
+          if (
+            prevActive.id === updatedData.id &&
+            prevActive.updatedAt === updatedData.updatedAt &&
+            JSON.stringify(prevActive.scores) === JSON.stringify(updatedData.scores) &&
+            JSON.stringify(prevActive.notes) === JSON.stringify(updatedData.notes)
+          ) {
+            return prevActive;
+          }
+          return updatedData;
+        });
+      }
+    }, (error) => {
+      console.error(`Realtime active unit sync error for ${docId}:`, error);
+    });
+
+    return () => unsubscribe();
+  }, [currentUserInfo, activeUnit?.id]);
+
+  // 3. Subscribe to the files subcollection of the active unit in real-time
+  useEffect(() => {
+    if (!currentUserInfo || !activeUnit || !activeUnit.id || activeUnit.id === 'no_data') {
+      setEvidenceFiles([]);
+      return;
+    }
+
+    const docId = activeUnit.id;
+    const filesColRef = collection(db, 'assessments', docId, 'files');
+    
+    const unsubscribe = onSnapshot(filesColRef, (snapshot) => {
+      const files: EvidenceFileMeta[] = [];
+      snapshot.forEach(docSnap => {
+        const data = docSnap.data();
+        files.push({
+          id: data.id,
+          itemId: data.itemId,
+          name: data.name,
+          type: data.type,
+          size: data.size,
+          uploadedAt: data.uploadedAt
+        });
+      });
+      const sortedFiles = files.sort((a, b) => (b.uploadedAt || '').localeCompare(a.uploadedAt || ''));
+      setEvidenceFiles(sortedFiles);
+    }, (error) => {
+      console.error(`Realtime evidence files sync error for ${docId}:`, error);
+    });
+
+    return () => unsubscribe();
+  }, [currentUserInfo, activeUnit?.id]);
+
+  // 4. Subscribe to activity logs in real-time for the admin account
+  useEffect(() => {
+    if (!currentUserInfo || (currentUserInfo.email !== 'primarycareunit.ubuh@ubu.ac.th' && currentUserInfo.role !== 'admin')) {
+      return;
+    }
+
+    const logsColRef = collection(db, 'activity_logs');
+    
+    const unsubscribe = onSnapshot(logsColRef, (snapshot) => {
+      const list: ActivityLog[] = [];
+      snapshot.forEach(docSnap => {
+        list.push(docSnap.data() as ActivityLog);
+      });
+      const sorted = list.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+      setActivityLogs(sorted);
+    }, (error) => {
+      console.error("Realtime activity logs sync error:", error);
+    });
+
+    return () => unsubscribe();
+  }, [currentUserInfo]);
 
   // Load files list whenever unit or evaluations change
   const reloadFilesList = async (id: string) => {
@@ -67,68 +239,74 @@ export default function App() {
   // Auth Handler: Loads existing assessment or sets up a fresh one
   const handleAuthConfirm = async (info: {
     email: string;
+    displayName?: string;
     name: string;
     district: string;
     province: string;
-    role: 'editor' | 'supervisor';
+    role: 'editor' | 'supervisor' | 'admin';
   }) => {
     setSessionLoading(true);
     setAuthError('');
     setSessionRole(info.role);
-    const docId = info.email.replace(/[@.]/g, '_');
-    try {
-      if (info.role === 'supervisor') {
-        const list = await getAllAssessments();
-        setAllUnitsList(list);
-        if (list.length > 0) {
-          // Default to the first unit or UBUH unit if found
-          const defaultUnit = list.find(u => u.unitName.includes('อุบล')) || list[0];
-          setActiveUnit(defaultUnit);
-          await reloadFilesList(defaultUnit.id);
-        } else {
-          // Fallback if no data uploaded yet
-          const tempUnit: AssessmentData = {
-            id: 'no_data',
-            unitEmail: info.email,
-            unitName: 'ยังไม่มีสถิติโรงพยาบาลส่งข้อมูล',
-            district: '-',
-            province: 'อุบลราชธานี',
-            scores: {},
-            notes: {},
-            updatedAt: new Date().toISOString()
-          };
-          setActiveUnit(tempUnit);
-          setEvidenceFiles([]);
-        }
-      } else {
-        const existing = await getAssessment(docId);
-        if (existing) {
-          setActiveUnit(existing);
-          await reloadFilesList(existing.id);
-        } else {
-          // Build empty state
-          const initialScores: Record<string, number> = {};
-          const initialNotes: Record<string, string> = {};
-          ASSESSMENT_ITEMS.forEach(it => {
-            initialScores[it.id] = 0;
-            initialNotes[it.id] = '';
-          });
+    
+    // Force all accounts to use the single central database instance of Ubon Ratchathani University Hospital
+    const HOSPITAL_DOC_ID = 'primarycareunit_ubuh_ubu_ac_th';
+    const docId = HOSPITAL_DOC_ID;
 
-          const freshUnit: AssessmentData = {
-            id: docId,
-            unitEmail: info.email,
-            unitName: info.name,
-            district: info.district,
-            province: info.province,
-            scores: initialScores,
-            notes: initialNotes,
-            updatedAt: new Date().toISOString()
-          };
-          await saveAssessment(freshUnit);
-          setActiveUnit(freshUnit);
-          setEvidenceFiles([]);
+    try {
+      const existing = await getAssessment(docId);
+      if (existing) {
+        setActiveUnit(existing);
+        await reloadFilesList(existing.id);
+      } else {
+        // Build empty state for the central hospital record
+        const initialScores: Record<string, number> = {};
+        const initialNotes: Record<string, string> = {};
+        ASSESSMENT_ITEMS.forEach(it => {
+          initialScores[it.id] = 0;
+          initialNotes[it.id] = '';
+        });
+
+        const freshUnit: AssessmentData = {
+          id: HOSPITAL_DOC_ID,
+          unitEmail: 'primarycareunit.ubuh@ubu.ac.th',
+          unitName: 'โรงพยาบาลมหาวิทยาลัยอุบลราชธานี',
+          district: 'วารินชำราบ',
+          province: 'อุบลราชธานี',
+          scores: initialScores,
+          notes: initialNotes,
+          updatedAt: new Date().toISOString()
+        };
+        await saveAssessment(freshUnit);
+        setActiveUnit(freshUnit);
+        setEvidenceFiles([]);
+      }
+
+      // Populate list with the single hospital unit for display and compatibility
+      const currentUnit = existing || {
+        id: HOSPITAL_DOC_ID,
+        unitEmail: 'primarycareunit.ubuh@ubu.ac.th',
+        unitName: 'โรงพยาบาลมหาวิทยาลัยอุบลราชธานี',
+        district: 'วารินชำราบ',
+        province: 'อุบลราชธานี',
+        scores: {},
+        notes: {},
+        updatedAt: new Date().toISOString()
+      };
+      setAllUnitsList([currentUnit]);
+      
+      setCurrentUserInfo({ email: info.email, displayName: info.displayName, name: info.name, role: info.role });
+      
+      // Load logs for admin
+      if (info.email === 'primarycareunit.ubuh@ubu.ac.th' || info.role === 'admin') {
+        try {
+          const logs = await getActivityLogs();
+          setActivityLogs(logs);
+        } catch (err) {
+          console.error("Failed to load initial admin activity logs:", err);
         }
       }
+
       setCloudStatus('success');
       setTimeout(() => setCloudStatus('idle'), 3000);
     } catch (err: any) {
@@ -159,25 +337,17 @@ export default function App() {
   };
 
   const handleRefreshSupervisorData = async () => {
-    if (sessionRole !== 'supervisor') {
-      if (activeUnit) {
-        setCloudStatus('syncing');
-        await reloadFilesList(activeUnit.id);
-        setCloudStatus('success');
-        setTimeout(() => setCloudStatus('idle'), 3000);
-      }
-      return;
-    }
     setCloudStatus('syncing');
     try {
-      const units = await getAllAssessments();
-      setAllUnitsList(units);
-      if (activeUnit) {
-        const updatedActive = units.find(u => u.id === activeUnit.id) || units[0];
-        if (updatedActive) {
-          setActiveUnit(updatedActive);
-          await reloadFilesList(updatedActive.id);
-        }
+      const HOSPITAL_DOC_ID = 'primarycareunit_ubuh_ubu_ac_th';
+      const singleUnit = await getAssessment(HOSPITAL_DOC_ID);
+      if (singleUnit) {
+        setActiveUnit(singleUnit);
+        setAllUnitsList([singleUnit]);
+        await reloadFilesList(HOSPITAL_DOC_ID);
+      }
+      if (currentUserInfo?.email === 'primarycareunit.ubuh@ubu.ac.th' || currentUserInfo?.role === 'admin') {
+        await reloadActivityLogs();
       }
       setCloudStatus('success');
       setTimeout(() => setCloudStatus('idle'), 3000);
@@ -206,6 +376,28 @@ export default function App() {
 
     try {
       await saveAssessment(updatedUnit);
+      
+      try {
+        const userEmail = currentUserInfo?.email || activeUnit.unitEmail;
+        const userName = currentUserInfo?.name || activeUnit.unitName;
+        await logActivity(
+          userEmail,
+          currentUserInfo?.displayName,
+          userName,
+          'edit_evaluation',
+          `แก้ไขการประเมินคะแนนเป็น ${score} คะแนน, บันทึก: ${note || '(ว่างเปล่า)'}`,
+          evaluatedItem.id,
+          evaluatedItem.code,
+          evaluatedItem.name
+        );
+        if (currentUserInfo?.email === 'primarycareunit.ubuh@ubu.ac.th' || currentUserInfo?.role === 'admin') {
+          const logs = await getActivityLogs();
+          setActivityLogs(logs);
+        }
+      } catch (logErr) {
+        console.error("Failed to log score/note update activity:", logErr);
+      }
+
       setActiveUnit(updatedUnit);
       setCloudStatus('success');
       setEvaluatedItem(null); // Close modal
@@ -258,10 +450,10 @@ export default function App() {
   };
 
   const handleLogout = () => {
-    if (confirm('คุณต้องการเปลี่ยนหน่วยบริการตรวจประเมินหรือออกจากระบบใช่หรือไม่?')) {
-      setActiveUnit(null);
-      setEvidenceFiles([]);
-    }
+    setActiveUnit(null);
+    setEvidenceFiles([]);
+    setCurrentUserInfo(null);
+    setLogoutConfirm(false);
   };
 
   // Filter items inside checklist panel
@@ -276,9 +468,11 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-800 antialiased flex flex-col">
-      {/* Dynamic Background Gradient Decorator */}
-      <div className="absolute top-0 left-0 right-0 h-40 bg-teal-800/10 pointer-events-none" />
+    <div className="min-h-screen bg-[#F8FAFC] text-slate-800 antialiased flex flex-col relative overflow-x-hidden font-sans">
+      {/* Dynamic Background Gradient Decorator - Softened for a friendly vibe */}
+      <div className="absolute top-0 left-0 right-0 h-[50vh] bg-gradient-to-b from-teal-50/80 via-emerald-50/40 to-transparent pointer-events-none" />
+      <div className="absolute top-[-10%] -left-64 h-[40rem] w-[40rem] bg-teal-200/20 rounded-full blur-[100px] pointer-events-none mix-blend-multiply" />
+      <div className="absolute top-[10%] -right-64 h-[40rem] w-[40rem] bg-emerald-200/20 rounded-full blur-[100px] pointer-events-none mix-blend-multiply" />
 
       {/* Sync Status Banner */}
       <div className="sticky top-0 z-40 bg-slate-900 text-white text-xs px-6 py-2.5 flex items-center justify-between border-b border-slate-700/50 backdrop-blur-md bg-opacity-95">
@@ -287,7 +481,7 @@ export default function App() {
           <span>ระบบคลาวด์ซิงค์ (Firebase Firestore) :</span>
           {activeUnit ? (
             <span className="text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-              {activeUnit.unitEmail}
+              {activeUnit.unitEmail} {(currentUserInfo?.email === 'primarycareunit.ubuh@ubu.ac.th' || currentUserInfo?.role === 'admin') && ' [สิทธิ์แอดมิน 👑]'}
             </span>
           ) : (
             <span className="text-slate-400">ยังไม่เชื่อมต่อ</span>
@@ -321,12 +515,32 @@ export default function App() {
           )}
 
           {activeUnit && (
-            <button 
-              onClick={handleLogout} 
-              className="text-slate-300 hover:text-white inline-flex items-center gap-1 bg-slate-800 hover:bg-slate-700 px-2 py-0.5 rounded border border-slate-700 transition text-[10px] uppercase font-bold cursor-pointer"
-            >
-              <LogOut className="h-3 w-3" /> ออกระบบ / เปลี่ยนหน่วย
-            </button>
+            <div className="flex items-center gap-1.5">
+              {logoutConfirm ? (
+                <div className="flex items-center gap-1.5 bg-slate-900 px-2.5 py-1 rounded-md border border-red-500/30 animate-fade-in text-[10px] text-red-200 font-sans font-medium">
+                  <span>ยืนยันออกระบบ?</span>
+                  <button
+                    onClick={handleLogout}
+                    className="bg-red-600 hover:bg-red-700 text-white font-bold px-2 py-0.5 rounded cursor-pointer transition text-[9px]"
+                  >
+                    ใช่
+                  </button>
+                  <button
+                    onClick={() => setLogoutConfirm(false)}
+                    className="bg-slate-700 hover:bg-slate-600 text-slate-200 font-bold px-2 py-0.5 rounded cursor-pointer transition text-[9px]"
+                  >
+                    ยกเลิก
+                  </button>
+                </div>
+              ) : (
+                <button 
+                  onClick={() => setLogoutConfirm(true)} 
+                  className="text-slate-300 hover:text-white inline-flex items-center gap-1 bg-slate-800 hover:bg-slate-700 px-2 py-0.5 rounded border border-slate-700 transition text-[10px] uppercase font-bold cursor-pointer"
+                >
+                  <LogOut className="h-3 w-3" /> ออกระบบ / เปลี่ยนหน่วย
+                </button>
+              )}
+            </div>
           )}
         </div>
       </div>
@@ -336,232 +550,317 @@ export default function App() {
         <AuthModal onConfirm={handleAuthConfirm} isLoading={sessionLoading} externalError={authError} />
       ) : (
         <div className="flex-1 max-w-7xl mx-auto w-full p-4 md:p-6 lg:p-8 space-y-6">
+          {sessionRole === 'editor' && (
+            <div className="bg-gradient-to-r from-teal-50 to-emerald-50 rounded-2xl p-5 border border-teal-100/60 shadow-sm relative overflow-hidden group transition-all">
+              <div className="flex items-start gap-3 relative z-10">
+                <div className="mt-0.5 bg-white p-2 rounded-xl border border-teal-100 shadow-xs">
+                  <ShieldCheck className="h-5 w-5 text-teal-600" />
+                </div>
+                <div className="space-y-2">
+                  <h4 className="text-sm font-bold text-teal-900">สิทธิ์ผู้ประเมินร่วมและสัญญะผู้บริหารสูงสุด</h4>
+                  <p className="text-[12px] text-teal-800 leading-relaxed font-medium">
+                    อนุญาตให้กรอกคะแนน ประเมินมาตรฐาน แนบรายละเอียดย่อย หรืออัปโหลดไฟล์หลักฐาน (Word / PDF / รูปภาพ) และสิทธิ์ดาวน์โหลดตรวจสอบข้อมูลได้ตามปกติในระบบ
+                  </p>
+                  <div className="bg-white/80 rounded-xl p-3 border border-teal-100/50 text-[11px] text-slate-700 space-y-2 font-medium">
+                    <p>👑 <strong className="text-purple-600 mx-1">ผู้ดูแลระบบ (Admin)</strong> ได้รับสิทธิ์ตรวจสอบประวัติย้อนหลังและจัดการสิทธิ์ผู้ใช้งานได้</p>
+                    <p>📧 <strong className="text-teal-900 mx-1">ผู้ประเมิน (Editor)</strong> ร่วมประเมินคะแนนและอัปโหลดหลักฐานเข้าฐานข้อมูล</p>
+                    <p>👀 <strong className="text-indigo-600 mx-1">ผู้นิเทศ (Supervisor)</strong> มีสิทธิ์อ่านประเมินอย่างเดียว</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
           
           {/* Dashboard Header Panel */}
-          <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 relative overflow-hidden">
-            <div className="space-y-1.5 z-10 w-full md:w-auto">
+          <motion.div 
+            initial={{ opacity: 0, y: 15 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="bg-white/70 backdrop-blur-2xl rounded-[3rem] p-8 px-10 shadow-[0_8px_30px_rgb(0,0,0,0.02)] border border-white flex flex-col md:flex-row justify-between items-start md:items-center gap-8 relative overflow-hidden"
+          >
+            <div className="space-y-4 z-10 w-full md:w-auto">
               <div className="flex items-center gap-2 flex-wrap">
-                <span className="bg-teal-600 text-white rounded-lg px-2.5 py-1 text-xs font-bold leading-normal uppercase">
+                <span className="bg-gradient-to-r from-teal-500 to-emerald-400 text-white rounded-full px-4 py-1.5 text-[11px] font-bold leading-normal uppercase shadow-sm">
                   ประจำปี พ.ศ. 2569
                 </span>
-                <span className="text-xs text-teal-800 font-bold bg-teal-50 border border-teal-100 px-2 py-0.5 rounded-lg">
-                  โรงพยาบาลมหาวิทยาลัยอุบลราชธานี
+                <span className="bg-slate-800 text-white rounded-full px-4 py-1.5 text-[11px] font-bold leading-normal shadow-sm">
+                  เกณฑ์รอบปี พ.ศ. 2568 - 2570
+                </span>
+                <span className="text-[11px] text-teal-700 font-bold bg-teal-50 border border-teal-100/50 px-4 py-1.5 rounded-full">
+                  โรงพยาบาลมหาวิทยาลัยอุบลราชธานี {(currentUserInfo?.email === 'primarycareunit.ubuh@ubu.ac.th' || currentUserInfo?.role === 'admin') && ' (ผู้ดูแลระบบสูงสุด 👑)'}
                 </span>
                 {sessionRole === 'supervisor' && (
-                  <span className="text-xs text-indigo-800 font-bold bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-lg">
+                  <span className="text-[11px] text-indigo-700 font-bold bg-indigo-50 border border-indigo-100 px-4 py-1.5 rounded-full flex items-center gap-1">
+                    <ShieldCheck className="h-3 w-3" />
                     สิทธิ์ผู้นิเทศภายนอก (อ่านอย่างเดียว)
                   </span>
                 )}
               </div>
 
-              {sessionRole === 'supervisor' && allUnitsList.length > 0 ? (
-                <div className="mt-3">
-                  <label className="block text-[11px] font-bold text-indigo-900 mb-1">เลือกตรวจประเมินหน่วยงานในระบบคลาวด์:</label>
-                  <select
-                    value={activeUnit.id}
-                    onChange={(e) => handleSwitchUnit(e.target.value)}
-                    className="text-xs font-bold text-slate-800 bg-slate-50 hover:bg-slate-100 border border-slate-200 hover:border-slate-300 rounded-xl px-3 py-2 focus:border-indigo-500 outline-none w-full max-w-sm cursor-pointer transition shadow-xs"
-                  >
-                    {allUnitsList.map(unit => (
-                      <option key={unit.id} value={unit.id}>
-                        {unit.unitName} ({unit.unitEmail})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              ) : (
-                <h1 className="text-xl md:text-2xl font-bold tracking-tight text-slate-900 mt-1">
-                  {activeUnit.unitName}
-                </h1>
-              )}
+              <div className="flex items-start md:items-center gap-4 mt-3">
+                {HOSPITAL_LOGO_BASE64 && (
+                  <div className="flex h-16 w-16 md:h-20 md:w-20 shrink-0 items-center justify-center rounded-[1.5rem] bg-white shadow-sm border border-slate-100 overflow-hidden p-2 mt-1 md:mt-0">
+                     <img src={HOSPITAL_LOGO_BASE64} alt="Hospital Logo" className="h-full w-full object-contain drop-shadow-sm rounded-lg" />
+                  </div>
+                )}
+                <div className="flex-1 w-full space-y-2">
+                  {sessionRole === 'supervisor' && allUnitsList.length > 1 ? (
+                    <div>
+                      <label className="block text-[11px] font-bold text-indigo-900 mb-2 pl-1">เลือกตรวจประเมินหน่วยงานในระบบคลาวด์:</label>
+                      <select
+                        value={activeUnit.id}
+                        onChange={(e) => handleSwitchUnit(e.target.value)}
+                        className="text-[13px] font-bold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 rounded-2xl px-5 py-3 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 outline-none w-full max-w-sm cursor-pointer transition shadow-sm"
+                      >
+                        {allUnitsList.map(unit => (
+                          <option key={unit.id} value={unit.id}>
+                            {unit.unitName} ({unit.unitEmail})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  ) : (
+                    <h1 className="text-3xl md:text-4xl font-extrabold tracking-tight text-slate-800">
+                      {activeUnit.unitName}
+                    </h1>
+                  )}
 
-              <p className="text-xs text-slate-500 font-medium">
-                ที่ตั้งส่วนงาน: อำเภอ{activeUnit.district} จังหวัด{activeUnit.province}
-              </p>
+                  <p className="text-sm text-slate-500 font-medium font-sans flex items-center gap-1.5">
+                    <Building className="h-4 w-4 text-slate-400" />
+                    {activeUnit.district || activeUnit.province ? (
+                      `ที่ตั้งส่วนงาน: ${activeUnit.district ? `อำเภอ${activeUnit.district}` : ''} ${activeUnit.province ? `จังหวัด${activeUnit.province}` : ''}`
+                    ) : (
+                      `ข้อมูลผู้ประสานงานหลัก: ${activeUnit.unitEmail}`
+                    )}
+                  </p>
+                </div>
+              </div>
             </div>
 
-            <div className="flex items-center gap-2 flex-wrap z-10 w-full md:w-auto">
-              <button
+            <div className="flex items-center gap-3 flex-wrap z-10 w-full md:w-auto">
+              {(currentUserInfo?.email === 'primarycareunit.ubuh@ubu.ac.th' || currentUserInfo?.role === 'admin') && (
+                <>
+                  <motion.button
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                    onClick={() => setShowUserManagement(true)}
+                    className="inline-flex items-center gap-2 h-14 rounded-full border-2 border-purple-100 bg-purple-50 hover:bg-purple-100 px-6 text-[15px] font-bold text-purple-600 shadow-[0_4px_15px_rgb(0,0,0,0.03)] hover:shadow-[0_4px_15px_rgb(0,0,0,0.06)] transition-all cursor-pointer"
+                  >
+                    <UserCheck className="h-4 w-4" />
+                    <span>จัดการสิทธิ์</span>
+                  </motion.button>
+                  <motion.button
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                    onClick={() => setShowHistoryModal(true)}
+                    className="inline-flex items-center gap-2 h-14 rounded-full border-2 border-orange-100 bg-orange-50 hover:bg-orange-100 px-6 text-[15px] font-bold text-orange-600 shadow-[0_4px_15px_rgb(0,0,0,0.03)] hover:shadow-[0_4px_15px_rgb(0,0,0,0.06)] transition-all cursor-pointer"
+                  >
+                    <History className="h-4 w-4" />
+                    <span>ดูประวัติการใช้งาน</span>
+                  </motion.button>
+                </>
+              )}
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
                 onClick={handlePrint}
-                className="inline-flex items-center gap-1.5 h-9 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 px-4 text-xs font-semibold text-slate-700 shadow-xs transition cursor-pointer"
+                className="inline-flex items-center gap-2 h-14 rounded-full border-2 border-slate-100 bg-white hover:border-slate-200 px-6 text-[15px] font-bold text-slate-600 shadow-[0_4px_15px_rgb(0,0,0,0.03)] hover:shadow-[0_4px_15px_rgb(0,0,0,0.06)] transition-all cursor-pointer"
               >
                 <Printer className="h-4 w-4" />
-                <span>พิมพ์ / บันทึกรายงาน PDF</span>
-              </button>
-              <button 
+                <span>พิมพ์ / บันทึกรายงาน</span>
+              </motion.button>
+              <motion.button 
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
                 onClick={handleRefreshSupervisorData}
-                className="inline-flex items-center gap-1.5 h-9 rounded-xl border border-teal-150 bg-teal-50 hover:bg-teal-100 px-4 text-xs font-semibold text-teal-800 shadow-xs transition cursor-pointer"
+                className="inline-flex items-center gap-2 h-14 rounded-full border border-teal-100 bg-teal-50 hover:bg-teal-100 hover:border-teal-200 px-6 text-[15px] font-bold text-teal-700 shadow-[0_4px_15px_rgb(0,128,128,0.05)] transition-all cursor-pointer"
               >
-                <RefreshCw className="h-3.5 w-3.5" />
-                <span>รีเฟรชสถิติล่าสุด</span>
-              </button>
+                <RefreshCw className="h-4 w-4" />
+                <span>รีเฟรชข้อมูล</span>
+              </motion.button>
             </div>
             
             {/* Background Aesthetic Splashes */}
-            <div className="absolute top-0 right-0 h-40 w-40 bg-teal-50 rounded-full blur-3xl -z-0 opacity-40 translate-x-12 -translate-y-12" />
-          </div>
+            <div className="absolute top-0 right-0 h-[30rem] w-[30rem] bg-gradient-to-bl from-teal-200/30 to-emerald-200/10 rounded-full blur-3xl opacity-60 translate-x-32 -translate-y-32 pointer-events-none" />
+          </motion.div>
 
           {/* Stats Bento Grid */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <motion.div 
+            initial={{ opacity: 0, y: 15 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.1 }}
+            className="grid grid-cols-1 md:grid-cols-3 gap-6"
+          >
             
             {/* Stat Card 1: Score Progress */}
-            <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 flex items-center justify-between">
-              <div className="space-y-1">
-                <span className="text-xs font-bold tracking-wider text-slate-400 uppercase">คะแนนผลการประเมินรวม</span>
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-3xl font-black text-slate-900">{calculateTotalScore()}</span>
-                  <span className="text-slate-400 text-sm font-semibold">/ 335 คะแนน</span>
+            <div className="bg-white/70 backdrop-blur-2xl rounded-[2.5rem] p-8 shadow-[0_8px_30px_rgb(0,0,0,0.02)] border border-white flex items-center justify-between group hover:shadow-[0_12px_40px_rgb(0,0,0,0.04)] transition-all duration-500">
+              <div className="space-y-1.5">
+                <span className="text-[11px] font-extrabold tracking-widest text-slate-400 uppercase">คะแนนผลการประเมินรวม</span>
+                <div className="flex items-baseline gap-2">
+                  <span className="text-4xl font-extrabold text-slate-800">{calculateTotalScore()}</span>
+                  <span className="text-slate-400 text-sm font-bold">/ 335 คะแนน</span>
                 </div>
-                <p className="text-[10px] text-slate-500 font-medium">รวมผลลัพธ์จากข้อประเมิน 8 หมวดคุณภาพ</p>
+                <p className="text-[11px] text-slate-500 font-medium">รวมผลลัพธ์จากข้อประเมิน 8 หมวดคุณภาพ</p>
               </div>
-              <div className="h-16 w-16 flex items-center justify-center rounded-full bg-slate-50 border border-slate-100">
-                <Award className="h-8 w-8 text-teal-600" />
+              <div className="h-20 w-20 flex items-center justify-center rounded-[1.5rem] bg-teal-50 border border-teal-100 group-hover:scale-105 group-hover:-rotate-3 transition-transform duration-500 shadow-sm text-teal-600">
+                <Award className="h-9 w-9" />
               </div>
             </div>
 
             {/* Stat Card 2: Coverage Counter */}
-            <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 flex items-center justify-between">
-              <div className="space-y-1">
-                <span className="text-xs font-bold tracking-wider text-slate-400 uppercase">ปริมาณข้อที่ได้รับการสำรวจ</span>
-                <div className="flex items-baseline gap-1.5">
-                  <span className="text-3xl font-black text-teal-600">{countEvaluated()}</span>
-                  <span className="text-slate-400 text-sm font-semibold">/ {ASSESSMENT_ITEMS.length} ข้อ</span>
+            <div className="bg-white/70 backdrop-blur-2xl rounded-[2.5rem] p-8 shadow-[0_8px_30px_rgb(0,0,0,0.02)] border border-white flex items-center justify-between group hover:shadow-[0_12px_40px_rgb(0,0,0,0.04)] transition-all duration-500">
+              <div className="space-y-1.5 w-full pr-6">
+                <span className="text-[11px] font-extrabold tracking-widest text-slate-400 uppercase">ประมาณการสำรวจ</span>
+                <div className="flex items-baseline gap-2">
+                  <span className="text-4xl font-extrabold text-emerald-500">{countEvaluated()}</span>
+                  <span className="text-slate-400 text-sm font-bold">/ {ASSESSMENT_ITEMS.length} ข้อ</span>
                 </div>
                 {/* Horizontal Progress Bar */}
-                <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden mt-2">
+                <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden mt-3 shadow-inner">
                   <div 
-                    className="bg-teal-500 h-full transition-all duration-500" 
+                    className="bg-gradient-to-r from-emerald-400 to-teal-500 h-full transition-all duration-1000 ease-out" 
                     style={{ width: `${(countEvaluated() / ASSESSMENT_ITEMS.length) * 100}%` }}
                   />
                 </div>
               </div>
-              <div className="h-16 w-16 flex items-center justify-center rounded-full bg-teal-50 border border-teal-100/50">
-                <Activity className="h-7 w-7 text-teal-600" />
+              <div className="h-20 w-20 shrink-0 flex items-center justify-center rounded-[1.5rem] bg-emerald-50 border border-emerald-100 group-hover:scale-105 group-hover:rotate-3 transition-transform duration-500 shadow-sm text-emerald-500">
+                <Activity className="h-9 w-9" />
               </div>
             </div>
 
             {/* Stat Card 3: Compliance Badge */}
-            <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 flex items-center justify-between">
-              <div className="space-y-1">
-                <span className="text-xs font-bold tracking-wider text-slate-400 uppercase">สถานะผ่านมาตรฐานภาพรวม</span>
+            <div className="bg-white/70 backdrop-blur-2xl rounded-[2.5rem] p-8 shadow-[0_8px_30px_rgb(0,0,0,0.02)] border border-white flex items-center justify-between group hover:shadow-[0_12px_40px_rgb(0,0,0,0.04)] transition-all duration-500">
+              <div className="space-y-2.5">
+                <span className="text-[11px] font-extrabold tracking-widest text-slate-400 uppercase">สถานะผ่านมาตรฐาน</span>
                 <div className="mt-1">
                   {checkOverallCompliance() ? (
-                    <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-800 text-xs font-bold border border-emerald-500/20">
-                      <CheckCircle className="h-4 w-4 text-emerald-600" />
+                    <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-emerald-50 text-emerald-700 text-[13px] font-bold border border-emerald-200">
+                      <CheckCircle className="h-4 w-4 text-emerald-500" />
                       <span>ผ่านเกณฑ์ประเมินปี 2569</span>
                     </div>
                   ) : (
-                    <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-rose-500/10 text-rose-800 text-xs font-bold border border-rose-500/20">
-                      <CircleAlert className="h-4 w-4 text-rose-600" />
+                    <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-rose-50 text-rose-600 text-[13px] font-bold border border-rose-200">
+                      <CircleAlert className="h-4 w-4 text-rose-500" />
                       <span>ยังไม่ผ่านเกณฑ์มาตรฐาน</span>
                     </div>
                   )}
                 </div>
-                <p className="text-[10px] text-slate-500 leading-normal mt-1.5">S1-S4 ต้องพรีเมี่ยมเต็ม และ S5-S8 ต้องผ่านมาไม่น้อยกว่าร้อยละ 80 ของแต่ละข้อ</p>
+                <p className="text-[11px] text-slate-500 font-medium leading-relaxed max-w-[200px]">
+                  S1-S4 ต้องพรีเมี่ยมเต็ม และ S5-S8 ต้องผ่านมาไม่น้อยกว่าร้อยละ 80 อย่างถูกต้อง
+                </p>
               </div>
-              <div className="h-16 w-16 flex items-center justify-center rounded-full bg-emerald-50 border border-emerald-100/50">
-                <Sparkles className="h-7 w-7 text-teal-600" />
+              <div className="h-20 w-20 shrink-0 flex items-center justify-center rounded-[1.5rem] bg-cyan-50 border border-cyan-100 group-hover:scale-105 group-hover:-rotate-3 transition-transform duration-500 shadow-sm text-cyan-500">
+                <Sparkles className="h-9 w-9" />
               </div>
             </div>
-          </div>
+          </motion.div>
 
           {/* Core Content Layout Split */}
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          <motion.div 
+            initial={{ opacity: 0, y: 15 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.2 }}
+            className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start"
+          >
             
             {/* Sidebar parts list (Col span 4) */}
-            <div className="lg:col-span-4 space-y-3">
-              <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400 px-1 mb-1">
+            <div className="lg:col-span-4 space-y-4">
+              <h2 className="text-[13px] font-extrabold uppercase tracking-widest text-slate-400 px-2 pb-1">
                 หมวดการประเมินแยกตามรายด้าน
               </h2>
-              <div className="space-y-2">
-                {ASSESSMENT_PARTS.map((part) => {
+              <div className="space-y-3">
+                {ASSESSMENT_PARTS.map((part, index) => {
                   const hasPassed = isPartPassing(part.index);
                   const currentScore = calculatePartScore(part.index);
                   const isActive = selectedPart === part.index;
 
                   return (
-                    <button
+                    <motion.button
+                      initial={{ opacity: 0, x: -10 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: 0.05 * index }}
                       key={part.index}
                       onClick={() => setSelectedPart(part.index)}
-                      className={`w-full hover:shadow-xs p-4 rounded-xl text-left border transition relative flex items-center justify-between cursor-pointer ${
+                      className={`w-full hover:shadow-md p-5 rounded-[2rem] text-left border-2 transition-all duration-300 relative flex items-center justify-between cursor-pointer group ${
                         isActive 
-                          ? 'bg-teal-600 text-white border-teal-600 shadow-md shadow-teal-700/10' 
-                          : 'bg-white text-slate-800 border-slate-100 hover:border-slate-200'
+                          ? 'bg-teal-500 text-white border-teal-500 shadow-[0_8px_30px_rgba(20,184,166,0.3)] ring-4 ring-teal-500/10' 
+                          : 'bg-white/70 backdrop-blur-2xl text-slate-700 border-white hover:border-teal-200'
                       }`}
                     >
                       <div className="space-y-1 max-w-[70%]">
-                        <span className={`text-[10px] font-bold block uppercase tracking-wide ${isActive ? 'text-teal-100' : 'text-slate-400'}`}>
+                        <span className={`text-[11px] font-extrabold block uppercase tracking-wider ${isActive ? 'text-teal-100' : 'text-slate-400 group-hover:text-teal-600 transition-colors'}`}>
                           หมวดที่ {part.index}
                         </span>
-                        <h4 className="text-xs font-bold tracking-tight line-clamp-1">
+                        <h4 className={`text-[15px] leading-tight font-extrabold tracking-tight line-clamp-2 ${isActive ? 'text-white' : 'text-slate-800 group-hover:text-teal-900 transition-colors'}`}>
                           {part.title.split('ด้าน')[1] || part.title}
                         </h4>
-                        <span className={`text-[10px] font-medium block truncate ${isActive ? 'text-teal-50' : 'text-slate-500'}`}>
+                        <span className={`text-[11px] font-medium block truncate ${isActive ? 'text-teal-50' : 'text-slate-500'}`}>
                           {part.passingThresholdText}
                         </span>
                       </div>
 
-                      <div className="text-right flex flex-col items-end gap-1 flex-shrink-0">
-                        <span className="text-sm font-black tracking-tight">
-                          {currentScore} <span className={`text-[10px] font-normal ${isActive ? 'text-teal-100' : 'text-slate-400'}`}>/ {part.maxScore}</span>
+                      <div className="text-right flex flex-col items-end gap-1.5 flex-shrink-0">
+                        <span className="text-xl font-black tracking-tight">
+                          {currentScore} <span className={`text-[11px] font-bold ${isActive ? 'text-teal-100' : 'text-slate-400'}`}>/ {part.maxScore}</span>
                         </span>
                         {hasPassed ? (
-                          <span className={`inline-flex rounded-full px-1.5 py-0.5 text-[8px] font-bold border ${
+                          <span className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-bold border ${
                             isActive 
-                              ? 'bg-emerald-400/20 text-emerald-250 border-emerald-400/30' 
-                              : 'bg-emerald-500/10 text-emerald-800 border-emerald-500/20'
+                              ? 'bg-white/20 text-white border-white/20' 
+                              : 'bg-emerald-50 text-emerald-600 border-emerald-100'
                           }`}>
                             ผ่านเกณฑ์
                           </span>
                         ) : (
-                          <span className={`inline-flex rounded-full px-1.5 py-0.5 text-[8px] font-bold border ${
+                          <span className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-bold border ${
                             isActive 
-                              ? 'bg-rose-400/20 text-rose-250 border-rose-450/30' 
-                              : 'bg-rose-500/10 text-rose-800 border-rose-500/20'
+                              ? 'bg-rose-400/20 text-rose-50 border-rose-400/30' 
+                              : 'bg-rose-50 text-rose-500 border-rose-100'
                           }`}>
                             ไม่ผ่าน
                           </span>
                         )}
                       </div>
-                    </button>
+                    </motion.button>
                   );
                 })}
               </div>
             </div>
 
             {/* Main Checklist panel (Col span 8) */}
-            <div className="lg:col-span-8 space-y-4">
+            <div className="lg:col-span-8 space-y-6">
               
               {/* Category summary header cards */}
-              <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 relative overflow-hidden">
-                <div className="space-y-1">
-                  <span className="text-xs text-teal-600 font-bold tracking-wide">
+              <div className="bg-white/70 backdrop-blur-2xl rounded-[3rem] p-8 md:p-10 shadow-[0_8px_30px_rgb(0,0,0,0.02)] border border-white relative overflow-hidden group">
+                <div className="absolute top-0 right-0 h-48 w-48 bg-gradient-to-br from-teal-200/40 to-emerald-200/20 rounded-full blur-[60px] pointer-events-none -translate-y-10 translate-x-10"></div>
+                <div className="space-y-2 relative z-10">
+                  <span className="text-[13px] text-teal-600 font-extrabold tracking-widest uppercase flex items-center gap-2">
                     {ASSESSMENT_PARTS[selectedPart - 1].title}
                   </span>
-                  <h2 className="text-base font-bold text-slate-900">
-                    รายการตรวจประเมินแยกแยะทีละข้อ (จำนวน {getItemsForPart(selectedPart).length} ข้อรายละเอียด)
+                  <h2 className="text-2xl md:text-3xl font-extrabold text-slate-800 leading-tight">
+                    รายการตรวจประเมินแยกแยะทีละข้อ
                   </h2>
-                  <p className="text-xs text-slate-500 leading-normal">
-                    {ASSESSMENT_PARTS[selectedPart - 1].description}
+                  <p className="text-sm font-medium text-slate-500 leading-relaxed pt-1">
+                    {ASSESSMENT_PARTS[selectedPart - 1].description} <span className="font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded-md ml-1">จำนวน {getItemsForPart(selectedPart).length} ข้อรายละเอียด</span>
                   </p>
                 </div>
 
                 {/* Inline filter search input */}
-                <div className="mt-4 flex max-w-md items-center gap-2 border border-slate-200 bg-slate-50 rounded-xl px-3 py-1.5 focus-within:bg-white focus-within:border-teal-500 focus-within:ring-1 focus-within:ring-teal-500 transition">
-                  <Search className="h-4 w-4 text-slate-400 flex-shrink-0" />
+                <div className="mt-8 flex max-w-lg items-center gap-3 border-2 border-slate-100 bg-white/60 backdrop-blur-md rounded-full px-5 py-3 focus-within:bg-white focus-within:border-teal-400 focus-within:shadow-md transition-all duration-300 relative z-10 shadow-sm group-hover:shadow-md">
+                  <Search className="h-5 w-5 text-slate-400 flex-shrink-0 group-focus-within:text-teal-500" />
                   <input
                     type="text"
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
                     placeholder="ป้อนรหัส เช่น 1.1 หรือคำค้นหา เช่น แพทย์, วัคซีน"
-                    className="w-full text-xs font-semibold text-slate-900 border-none outline-none bg-transparent"
+                    className="w-full text-[15px] font-semibold text-slate-700 border-none outline-none bg-transparent placeholder:text-slate-400 placeholder:font-medium"
                   />
                 </div>
               </div>
 
               {/* Items checklist */}
-              <div className="space-y-3">
-                {getFilteredItems().map((it) => {
+              <div className="space-y-4">
+                <AnimatePresence mode="popLayout">
+                {getFilteredItems().map((it, index) => {
                   const score = activeUnit.scores[it.id] || 0;
                   const itemNote = activeUnit.notes[it.id] || '';
                   const itemFilesCount = evidenceFiles.filter(f => f.itemId === it.id).length;
@@ -570,85 +869,110 @@ export default function App() {
                     <motion.div
                       key={it.id}
                       layout="position"
-                      className="bg-white rounded-2xl p-5 shadow-xs border border-slate-100 hover:border-slate-200 transition flex flex-col md:flex-row md:items-center justify-between gap-4"
+                      initial={{ opacity: 0, y: 15 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, scale: 0.95 }}
+                      transition={{ delay: index * 0.05, duration: 0.4, ease: [0.23, 1, 0.32, 1] }}
+                      className="bg-white/80 backdrop-blur-2xl rounded-[2.5rem] p-7 md:p-8 shadow-[0_4px_20px_rgb(0,0,0,0.02)] hover:shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-white hover:border-teal-100 transition-all duration-300 flex flex-col md:flex-row md:items-center justify-between gap-6 group"
                     >
-                      <div className="space-y-1 max-w-[80%]">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="inline-flex h-5 items-center justify-center rounded-lg bg-slate-100 px-2 text-[10px] font-bold text-slate-600">
+                      <div className="space-y-2.5 max-w-[75%]">
+                        <div className="flex items-center gap-2.5 flex-wrap">
+                          <span className="inline-flex items-center justify-center rounded-lg bg-slate-100 px-2.5 py-1 text-[11px] font-extrabold text-slate-600 border border-slate-200 shadow-sm">
                             ข้อ {it.code}
                           </span>
                           
                           {/* File Counter Badge */}
                           {itemFilesCount > 0 && (
-                            <span className="inline-flex items-center gap-1 h-5 rounded-lg bg-teal-50 px-2 text-[10px] font-bold text-teal-700 border border-teal-100">
+                            <span className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 px-3 py-1 text-[11px] font-bold text-indigo-600 border border-indigo-100 shadow-sm">
                               <FileText className="h-3 w-3" />
-                              <span>เอกสารแนบ {itemFilesCount} ไฟล์</span>
+                              <span>แนบแล้ว {itemFilesCount} ไฟล์</span>
                             </span>
                           )}
 
                           {itemNote && (
-                            <span className="inline-flex h-5 items-center justify-center rounded-lg bg-indigo-50 px-2 text-[10px] font-bold text-indigo-700 border border-indigo-100">
+                            <span className="inline-flex items-center rounded-lg bg-amber-50 px-3 py-1 text-[11px] font-bold text-amber-600 border border-amber-100 shadow-sm gap-1.5">
+                              <MessageSquare className="h-3 w-3" />
                               มีบันทึกรายงาน
                             </span>
                           )}
                         </div>
 
-                        <h4 className="text-sm font-bold text-slate-900 leading-normal">
+                        <h4 className="text-[17px] font-extrabold text-slate-800 leading-snug group-hover:text-teal-900 transition-colors">
                           {it.name}
                         </h4>
                         
-                        <p className="text-xs text-slate-500 leading-normal line-clamp-1">
+                        <p className="text-[13px] font-medium text-slate-500 leading-relaxed">
                           {it.description}
                         </p>
-                        
-                        {itemNote && (
-                          <div className="rounded-lg bg-slate-50 p-2.5 text-[11px] text-slate-600 border border-slate-100 max-w-full truncate">
-                            <strong>บันทึก:</strong> {itemNote}
-                          </div>
-                        )}
                       </div>
 
-                      <div className="flex flex-row md:flex-col items-center md:items-end justify-between md:justify-center gap-2 border-t md:border-t-0 pt-3 md:pt-0 border-slate-50">
+                      <div className="flex flex-row md:flex-col items-center md:items-end justify-between md:justify-center gap-4 shrink-0 border-t md:border-t-0 md:border-l border-slate-100 pt-4 md:pt-0 md:pl-6 mt-4 md:mt-0">
                         <div className="text-left md:text-right">
-                          <p className="text-[10px] text-slate-400 font-semibold uppercase">ผลคะแนนที่ได้</p>
-                          <span className="text-sm font-black text-slate-900">
-                            {score} <span className="text-[10px] text-slate-400 font-normal">/ {it.maxScore}</span>
-                          </span>
+                          <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mb-1.5">ผลคะแนน</p>
+                          <div className="flex items-baseline gap-1.5 justify-start md:justify-end">
+                            <span className={`text-2xl font-black ${score > 0 ? 'text-teal-600' : 'text-slate-800'}`}>
+                              {score}
+                            </span>
+                            <span className="text-sm font-bold text-slate-400">/ {it.maxScore}</span>
+                          </div>
                         </div>
 
-                        <button
+                        <motion.button
+                          whileHover={{ scale: 1.04 }}
+                          whileTap={{ scale: 0.96 }}
                           onClick={() => setEvaluatedItem(it)}
-                          className={`inline-flex items-center gap-1 h-8 rounded-lg text-white px-3 text-xs font-semibold shadow-sm transition hover:shadow-md cursor-pointer ${
-                            sessionRole === 'supervisor' ? 'bg-indigo-600 hover:bg-indigo-700' : 'bg-teal-600 hover:bg-teal-700'
+                          className={`inline-flex items-center gap-2 h-12 rounded-full text-white px-6 text-[15px] font-bold shadow-md transition-all cursor-pointer whitespace-nowrap ${
+                            sessionRole === 'supervisor' ? 'bg-indigo-500 hover:bg-indigo-600 hover:shadow-indigo-500/25' : 'bg-teal-500 hover:bg-teal-600 hover:shadow-teal-500/25'
                           }`}
                         >
-                          <span>{sessionRole === 'supervisor' ? 'ตรวจดูหลักฐานหลัก' : 'ประเมินและแนบข้อมูล'}</span>
-                          <ChevronRight className="h-3.5 w-3.5" />
-                        </button>
+                          <span>{sessionRole === 'supervisor' ? 'ตรวจดูหลักฐาน' : 'ประเมินและแนบข้อมูล'}</span>
+                          <ChevronRight className="h-4 w-4" />
+                        </motion.button>
                       </div>
                     </motion.div>
                   );
                 })}
+                </AnimatePresence>
 
                 {getFilteredItems().length === 0 && (
-                  <div className="rounded-2xl border border-slate-100 bg-white p-12 text-center">
+                  <motion.div 
+                    initial={{opacity: 0}}
+                    animate={{opacity: 1}}
+                    className="rounded-[2rem] border border-slate-200 border-dashed bg-white/50 backdrop-blur-xl p-16 text-center"
+                  >
                     <HelpCircle className="h-10 w-10 text-slate-400 mx-auto mb-2" />
                     <h3 className="text-sm font-bold text-slate-800">ไม่พบคำค้นหาหรือตัวชี้วัดในหมวดนี้</h3>
                     <p className="text-xs text-slate-500 mt-1">กรุณาลองป้อนหมวดหมู่ รหัสย่อย หรือลองล้างคำค้นหา</p>
-                  </div>
+                  </motion.div>
                 )}
               </div>
 
             </div>
-          </div>
-          
+          </motion.div>
+
+          {/* Admin Activity Logs Modal (Visible only to admin) */}
+          <AnimatePresence>
+            {(currentUserInfo?.email === 'primarycareunit.ubuh@ubu.ac.th' || currentUserInfo?.role === 'admin') && showHistoryModal && (
+              <HistoryModal
+                onClose={() => setShowHistoryModal(false)}
+                logs={activityLogs}
+                logsLoading={logsLoading}
+                reloadActivityLogs={reloadActivityLogs}
+                logSearchTerm={logSearchTerm}
+                setLogSearchTerm={setLogSearchTerm}
+                logActionFilter={logActionFilter}
+                setLogActionFilter={setLogActionFilter}
+              />
+            )}
+          </AnimatePresence>
+
           {/* Printable Report View (Visible only during window.print()) */}
           <div className="hidden print:block bg-white text-black p-8 font-sans space-y-6" id="printable-area">
             <div className="text-center space-y-2 border-b-2 border-black pb-4">
               <h1 className="text-2xl font-black">ใบรายงานผลสรุปตัวประเมินพัฒนาคุณภาพและมาตรฐานปฐมภูมิ</h1>
               <h2 className="text-lg font-bold">ข้อมูลการรับการประเมินประจำปีงบประมาณ พ.ศ. 2569</h2>
               <div className="text-sm space-y-1">
-                <p><strong>ชื่อหน่วยบริการ:</strong> {activeUnit.unitName} (อำเภอ{activeUnit.district} จังหวัด{activeUnit.province})</p>
+                <p><strong>ชื่อหน่วยบริการ:</strong> {activeUnit.unitName}{(activeUnit.district || activeUnit.province) ? ` (${[activeUnit.district ? `อำเภอ${activeUnit.district}` : '', activeUnit.province ? `จังหวัด${activeUnit.province}` : ''].filter(Boolean).join(' ')})` : ''}</p>
                 <p><strong>อีเมลประสานงาน:</strong> {activeUnit.unitEmail}</p>
                 <p><strong>วันที่ตรวจพยานหลักฐาน:</strong> {new Date().toLocaleDateString('th-TH')}</p>
               </div>
@@ -709,9 +1033,28 @@ export default function App() {
                 files={evidenceFiles}
                 assessmentId={activeUnit.id}
                 role={sessionRole}
+                currentUserEmail={currentUserInfo?.email || activeUnit.unitEmail}
+                currentUserDisplayName={currentUserInfo?.displayName}
+                currentUserName={currentUserInfo?.name || activeUnit.unitName}
                 onClose={() => setEvaluatedItem(null)}
                 onSaveItem={handleSaveEvaluation}
-                onFilesChanged={() => reloadFilesList(activeUnit.id)}
+                onFilesChanged={async () => {
+                  await reloadFilesList(activeUnit.id);
+                  if (currentUserInfo?.email === 'primarycareunit.ubuh@ubu.ac.th' || currentUserInfo?.role === 'admin') {
+                    const logs = await getActivityLogs();
+                    setActivityLogs(logs);
+                  }
+                }}
+              />
+            )}
+          </AnimatePresence>
+
+          {/* Admin User Management Modal */}
+          <AnimatePresence>
+            {(currentUserInfo?.email === 'primarycareunit.ubuh@ubu.ac.th' || currentUserInfo?.role === 'admin') && showUserManagement && (
+              <UserManagementModal 
+                currentUserEmail={currentUserInfo.email}
+                onClose={() => setShowUserManagement(false)}
               />
             )}
           </AnimatePresence>
