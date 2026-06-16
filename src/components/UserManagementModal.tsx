@@ -124,7 +124,7 @@ export default function UserManagementModal({ onClose, currentUserEmail }: UserM
                   type="email"
                   value={newEmail}
                   onChange={(e) => setNewEmail(e.target.value)}
-                  placeholder="เช่น doctor@ubu.ac.th"
+                  placeholder="เช่น user@gmail.com หรือ doctor@ubu.ac.th"
                   className="w-full text-sm rounded-xl border border-slate-200 px-4 py-2.5 outline-none focus:border-teal-400 focus:ring-4 focus:ring-teal-500/10 transition-all font-medium text-slate-700 bg-white"
                 />
               </div>
@@ -214,8 +214,9 @@ export default function UserManagementModal({ onClose, currentUserEmail }: UserM
               </div>
             )}
             
-            <div className="mt-4 p-4 bg-blue-50/50 rounded-xl border border-blue-100 text-xs text-blue-700 font-medium leading-relaxed">
-              💡 <strong>คำแนะนำ:</strong> อีเมลที่ไม่ได้อยู่ในรายชื่อด้านบน จะไม่สามารถล็อกอินเข้าสู่ระบบได้ (จะพบข้อความแจ้งเตือน "ไม่ได้รับอนุญาต") 
+             <div className="mt-4 p-4 bg-teal-50/55 rounded-xl border border-teal-100/60 text-xs text-teal-800 font-medium leading-relaxed space-y-1">
+              <p>💡 <strong>คำแนะนำ:</strong> สามารถเพิ่มบัญชี Google ได้ทุกประเภท (เช่น Gmail ทั่วไป หรืออีเมลหน่วยงานต่างๆ) โดยผู้ใช้ที่มีรายชื่อด้านบนเท่านั้นจึงจะมีสิทธิ์เข้าสู่ระบบสำเร็จ</p>
+              <p>⚠️ อีเมลอื่นที่ไม่ได้ลงทะเบียนไว้ในหน้านี้จะไม่ได้รับอนุญาตให้ใช้ระบบประเมินตนเองนี้ได้</p>
             </div>
           </div>
         </div>
