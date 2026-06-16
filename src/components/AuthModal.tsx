@@ -103,7 +103,7 @@ export default function AuthModal({ onConfirm, isLoading, externalError }: AuthM
 
     const code = supervisorPasscode.trim();
 
-    if (code !== '999999') {
+    if (code !== '1507803') {
       setError('ท่านกรอกรหัสไม่ถูกต้อง กรุณาติดต่อแอดมิน');
       return;
     }
