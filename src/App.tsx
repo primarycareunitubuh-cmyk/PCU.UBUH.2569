@@ -158,7 +158,8 @@ export default function App() {
             prevActive.id === updatedData.id &&
             prevActive.updatedAt === updatedData.updatedAt &&
             JSON.stringify(prevActive.scores) === JSON.stringify(updatedData.scores) &&
-            JSON.stringify(prevActive.notes) === JSON.stringify(updatedData.notes)
+            JSON.stringify(prevActive.notes) === JSON.stringify(updatedData.notes) &&
+            JSON.stringify(prevActive.evaluated || {}) === JSON.stringify(updatedData.evaluated || {})
           ) {
             return prevActive;
           }
@@ -275,6 +276,7 @@ export default function App() {
           province: 'อุบลราชธานี',
           scores: initialScores,
           notes: initialNotes,
+          evaluated: {},
           updatedAt: new Date().toISOString()
         };
         await saveAssessment(freshUnit);
@@ -291,6 +293,7 @@ export default function App() {
         province: 'อุบลราชธานี',
         scores: {},
         notes: {},
+        evaluated: {},
         updatedAt: new Date().toISOString()
       };
       setAllUnitsList([currentUnit]);
@@ -366,11 +369,13 @@ export default function App() {
     // Immutable field updates
     const updatedScores = { ...activeUnit.scores, [evaluatedItem.id]: score };
     const updatedNotes = { ...activeUnit.notes, [evaluatedItem.id]: note };
+    const updatedEvaluated = { ...(activeUnit.evaluated || {}), [evaluatedItem.id]: true };
 
     const updatedUnit: AssessmentData = {
       ...activeUnit,
       scores: updatedScores,
       notes: updatedNotes,
+      evaluated: updatedEvaluated,
       updatedAt: new Date().toISOString()
     };
 
@@ -426,7 +431,12 @@ export default function App() {
 
   const countEvaluated = (): number => {
     if (!activeUnit) return 0;
-    return ASSESSMENT_ITEMS.filter(it => (activeUnit.scores[it.id] > 0 || activeUnit.notes[it.id] !== '')).length;
+    return ASSESSMENT_ITEMS.filter(it => (
+      activeUnit.evaluated?.[it.id] === true ||
+      activeUnit.scores[it.id] > 0 || 
+      activeUnit.notes[it.id] !== '' ||
+      evidenceFiles.some(f => f.itemId === it.id)
+    )).length;
   };
 
   // Check compliance criteria for parts

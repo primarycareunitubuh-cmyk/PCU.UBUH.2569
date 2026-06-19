@@ -18,6 +18,7 @@ export interface AssessmentData {
   province: string;
   scores: Record<string, number>; // itemId -> score
   notes: Record<string, string>;   // itemId -> note
+  evaluated?: Record<string, boolean>; // itemId -> true (has been evaluated)
   updatedAt: string;
 }
 
