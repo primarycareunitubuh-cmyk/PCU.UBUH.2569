@@ -834,7 +834,7 @@ export default function ItemEvaluationModal({
             <span className="inline-flex rounded-full bg-teal-600/10 px-3 py-1 text-[11px] font-bold tracking-wider uppercase text-teal-800">
               ข้อที่ {item.code} (คะแนนเต็ม {item.maxScore} คะแนน)
             </span>
-            <h3 className="text-base font-bold text-slate-900 mt-2 line-clamp-1">{item.name}</h3>
+            <h3 className="text-base md:text-lg font-extrabold text-slate-900 mt-2 leading-snug">{item.name}</h3>
           </div>
           <button 
             onClick={onClose}
