@@ -10,7 +10,7 @@ import {
 } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { db, storage, handleFirestoreError, OperationType } from './firebase';
-import { PartInfo, AssessmentItem } from './data';
+import { PartInfo, AssessmentItem, ASSESSMENT_ITEMS, ASSESSMENT_PARTS } from './data';
 
 export interface AssessmentData {
   id: string; // Sanitized email
@@ -116,8 +116,45 @@ export async function uploadEvidenceFile(
     const base64Data = dataUrl.split(',')[1];
     const folderYear = getYearFromAssessmentId(assessmentId);
 
+    // Look up criteria information based on itemId
+    const currentItem = ASSESSMENT_ITEMS.find(item => item.id === itemId);
+    const itemCode = currentItem ? currentItem.code : '';
+    const itemName = currentItem ? currentItem.name : '';
+    const currentPartNum = currentItem ? currentItem.part : 1;
+    const currentPart = ASSESSMENT_PARTS.find(part => part.index === currentPartNum);
+    const partName = currentPart ? currentPart.title : `ส่วนที่ ${currentPartNum}`;
+
+    // Formatting for Google Drive folder separation
+    const partFolderName = partName; // e.g. "ส่วนที่ 1 ด้านระบบบริหารจัดการ"
+    const itemFolderName = `ข้อ ${itemCode}`; // e.g. "ข้อ 1.1"
+    const fullItemFolderName = `ข้อ ${itemCode} ${itemName}`.substring(0, 120);
+
     // 2. Upload file directly to the user's Google Apps Script Web App (safely bypassing CORS Preflight OPTIONS)
-    const scriptUrl = 'https://script.google.com/macros/s/AKfycbxeE2RTlavxEPWILigRe2Xt4NBRRKxvUQrDLwKZXz7KI7pjpqWxedaJrUOga0o_7dov/exec';
+    // Add query parameters for e.parameter-based scripts in addition to JSON body-based scripts
+    const baseUrl = 'https://script.google.com/macros/s/AKfycbzB0xAgBngYtD7ptUSh1FQ6Na364rHPOTrBcg4TtAT4gBhWaEnrOzSUYg7iwBiGY_JWcw/exec';
+    const queryParams = new URL(baseUrl);
+    queryParams.searchParams.set('filename', name);
+    queryParams.searchParams.set('fileName', name);
+    queryParams.searchParams.set('name', name);
+    queryParams.searchParams.set('type', type);
+    queryParams.searchParams.set('mimeType', type);
+    queryParams.searchParams.set('assessmentId', assessmentId);
+    queryParams.searchParams.set('itemId', itemId);
+    queryParams.searchParams.set('year', String(folderYear));
+    queryParams.searchParams.set('fiscalYear', String(folderYear));
+    queryParams.searchParams.set('folderYear', String(folderYear));
+    queryParams.searchParams.set('yearFolderName', `ปีงบประมาณ ${folderYear}`);
+    
+    // Add criteria parameters for subfolder generation
+    queryParams.searchParams.set('partFolderName', partFolderName);
+    queryParams.searchParams.set('itemFolderName', itemFolderName);
+    queryParams.searchParams.set('fullItemFolderName', fullItemFolderName);
+    queryParams.searchParams.set('partName', partName);
+    queryParams.searchParams.set('itemCode', itemCode);
+    queryParams.searchParams.set('itemName', itemName);
+    queryParams.searchParams.set('partNumber', String(currentPartNum));
+
+    const scriptUrl = queryParams.toString();
 
     const response = await fetch(scriptUrl, {
       method: 'POST',
@@ -125,19 +162,42 @@ export async function uploadEvidenceFile(
         'Content-Type': 'text/plain;charset=utf-8' // text/plain ensures browser handles this as a Simple Request, avoiding preflight rejection by script URL
       },
       body: JSON.stringify({
-        file: base64Data,
+        // File Name variations
         filename: name,
-        mimeType: type,
+        fileName: name,
         name: name,
+        file_name: name,
+        title: name,
+
+        // Mime Type variations
+        mimeType: type,
+        mimetype: type,
         type: type,
+        contentType: type,
+
+        // File Content variations
+        file: base64Data,
         base64: base64Data,
         data: base64Data,
+        content: base64Data,
+        contents: base64Data,
+
+        // Year metadata parameters
         assessmentId: assessmentId,
         itemId: itemId,
         year: folderYear,
         fiscalYear: folderYear,
         folderYear: folderYear,
-        yearFolderName: `ปีงบประมาณ ${folderYear}`
+        yearFolderName: `ปีงบประมาณ ${folderYear}`,
+
+        // Criteria details parameters
+        partFolderName,
+        itemFolderName,
+        fullItemFolderName,
+        partName,
+        itemCode,
+        itemName,
+        partNumber: currentPartNum
       })
     });
 
