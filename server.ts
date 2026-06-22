@@ -64,51 +64,71 @@ async function startServer() {
 
       console.log(`[ProxyUpload] Proxying upload to Apps Script for file "${name}" (${type}). Size of base64: ${base64Data.length}`);
 
-      const response = await fetch(scriptUrl, {
+      const requestBody = JSON.stringify({
+        filename: name,
+        fileName: name,
+        name: name,
+        file_name: name,
+        title: name,
+
+        mimeType: type,
+        mimetype: type,
+        type: type,
+        contentType: type,
+
+        file: base64Data,
+        base64: base64Data,
+        data: base64Data,
+        content: base64Data,
+        contents: base64Data,
+
+        assessmentId,
+        itemId,
+        year: folderYear,
+        fiscalYear: folderYear,
+        folderYear: folderYear,
+        yearFolderName: `ปีงบประมาณ ${folderYear}`,
+
+        partFolderName,
+        itemFolderName,
+        fullItemFolderName,
+        partName,
+        itemCode,
+        itemName,
+        partNumber: currentPartNum
+      });
+
+      // 1. Send the initial POST request with manual redirect handling to bypass default fetch redirect conversion (302 conversion from POST to GET)
+      let response = await fetch(scriptUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'text/plain;charset=utf-8'
         },
-        body: JSON.stringify({
-          filename: name,
-          fileName: name,
-          name: name,
-          file_name: name,
-          title: name,
-
-          mimeType: type,
-          mimetype: type,
-          type: type,
-          contentType: type,
-
-          file: base64Data,
-          base64: base64Data,
-          data: base64Data,
-          content: base64Data,
-          contents: base64Data,
-
-          assessmentId,
-          itemId,
-          year: folderYear,
-          fiscalYear: folderYear,
-          folderYear: folderYear,
-          yearFolderName: `ปีงบประมาณ ${folderYear}`,
-
-          partFolderName,
-          itemFolderName,
-          fullItemFolderName,
-          partName,
-          itemCode,
-          itemName,
-          partNumber: currentPartNum
-        })
+        body: requestBody,
+        redirect: 'manual'
       });
+
+      console.log(`[ProxyUpload] Initial request status: ${response.status}`);
+
+      // 2. If it redirects (typically 302 Found), follow the redirect using a GET request (Apps Script echo endpoint only supports GET)
+      if (response.status === 301 || response.status === 302 || response.status === 307 || response.status === 308) {
+        const redirectUrl = response.headers.get('location');
+        if (redirectUrl) {
+          console.log(`[ProxyUpload] Manually redirecting with GET to: ${redirectUrl}`);
+          response = await fetch(redirectUrl, {
+            method: 'GET'
+          });
+          console.log(`[ProxyUpload] Redirected request status: ${response.status}`);
+        } else {
+          console.error(`[ProxyUpload] Redirect status ${response.status} met but no Location header found.`);
+        }
+      }
 
       if (!response.ok) {
         console.error(`[ProxyUpload] Google Apps Script returned status ${response.status}`);
         res.status(response.status).json({
           status: "error",
-          error: `Google Apps Script returned HTTTP status code: ${response.status}`
+          error: `Google Apps Script returned HTTP status code: ${response.status}`
         });
         return;
       }
