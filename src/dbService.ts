@@ -117,7 +117,7 @@ export async function uploadEvidenceFile(
     const folderYear = getYearFromAssessmentId(assessmentId);
 
     // 2. Upload file directly to the user's Google Apps Script Web App (safely bypassing CORS Preflight OPTIONS)
-    const scriptUrl = 'https://script.google.com/macros/s/AKfycbxk4jUPpFbVdhOowjyS9PhYOw_WU7GLUP1MeBKsbnIwkXWY0Ddd5fJdh3sra-aKyQfr/exec';
+    const scriptUrl = 'https://script.google.com/macros/s/AKfycbxeE2RTlavxEPWILigRe2Xt4NBRRKxvUQrDLwKZXz7KI7pjpqWxedaJrUOga0o_7dov/exec';
 
     const response = await fetch(scriptUrl, {
       method: 'POST',
