@@ -26,10 +26,8 @@ import { motion, AnimatePresence } from 'motion/react';
 import { 
   ASSESSMENT_PARTS, 
   ASSESSMENT_ITEMS, 
-  getItemsForPart, 
-  getPartMaxScore, 
-  getPartPassingThreshold, 
-  AssessmentItem 
+  AssessmentItem,
+  PartInfo
 } from './data';
 import { 
   saveAssessment, 
@@ -40,12 +38,17 @@ import {
   EvidenceFileMeta,
   getActivityLogs,
   logActivity,
-  ActivityLog
+  ActivityLog,
+  getFiscalYearCriteria,
+  saveFiscalYearCriteria,
+  getAvailableFiscalYears,
+  getCurrentThaiFiscalYear
 } from './dbService';
 import AuthModal from './components/AuthModal';
 import { HOSPITAL_LOGO_BASE64 } from './config';
 import ItemEvaluationModal from './components/ItemEvaluationModal';
 import UserManagementModal from './components/UserManagementModal';
+import CriteriaManagementModal from './components/CriteriaManagementModal';
 import { 
   collection, 
   doc, 
@@ -103,6 +106,99 @@ export default function App() {
   const [cloudStatus, setCloudStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle');
   const [authError, setAuthError] = useState<string>('');
   const [logoutConfirm, setLogoutConfirm] = useState(false);
+
+  // Dynamic Multi-Year & Criteria States
+  const [fiscalYear, setFiscalYear] = useState<number>(() => getCurrentThaiFiscalYear());
+  const [availableYears, setAvailableYears] = useState<number[]>([2569]);
+  const [activeParts, setActiveParts] = useState<PartInfo[]>(ASSESSMENT_PARTS);
+  const [activeItems, setActiveItems] = useState<AssessmentItem[]>(ASSESSMENT_ITEMS);
+  const [showCriteriaManagement, setShowCriteriaManagement] = useState(false);
+
+  // Calculates which Firestore Document ID to load based on modern selected year (with backward compatibility)
+  const getAssessmentDocId = (year: number): string => {
+    if (year === 2569) return 'primarycareunit_ubuh_ubu_ac_th';
+    return `primarycareunit_ubuh_ubu_ac_th_${year}`;
+  };
+
+  // Dynamic Helpers matching signatures inside data.ts but reading active dynamic states
+  const getItemsForPart = (partIndex: number): AssessmentItem[] => {
+    return activeItems.filter(item => item.part === partIndex);
+  };
+
+  const getPartMaxScore = (partIndex: number): number => {
+    return activeParts.find(p => p.index === partIndex)?.maxScore || 1;
+  };
+
+  const getPartPassingThreshold = (partIndex: number): number => {
+    const part = activeParts.find(p => p.index === partIndex);
+    if (!part) return 0;
+    if (partIndex <= 4) {
+      return part.maxScore;
+    }
+    return Math.ceil(part.maxScore * 0.8);
+  };
+
+  // Loads dynamic year criteria and corresponding scoring records
+  const loadYearData = async (year: number) => {
+    setSessionLoading(true);
+    try {
+      // 1. Get available years list from DB
+      const years = await getAvailableFiscalYears();
+      setAvailableYears(years);
+
+      // 2. Fetch specific year's criteria
+      const criteria = await getFiscalYearCriteria(year);
+      let loadedParts = ASSESSMENT_PARTS;
+      let loadedItems = ASSESSMENT_ITEMS;
+      if (criteria) {
+        loadedParts = criteria.parts;
+        loadedItems = criteria.items;
+      } else {
+        // If none exist in Firestore, save the defaults so they are editable
+        await saveFiscalYearCriteria(year, ASSESSMENT_PARTS, ASSESSMENT_ITEMS, 'System Auto-Init');
+      }
+      setActiveParts(loadedParts);
+      setActiveItems(loadedItems);
+
+      // 3. Load or build the assessment document for this year
+      const docId = getAssessmentDocId(year);
+      const existing = await getAssessment(docId);
+      let currentUnit: AssessmentData;
+
+      if (existing) {
+        currentUnit = existing;
+      } else {
+        // Build empty state for the central hospital record for this year
+        const initialScores: Record<string, number> = {};
+        const initialNotes: Record<string, string> = {};
+        loadedItems.forEach(it => {
+          initialScores[it.id] = 0;
+          initialNotes[it.id] = '';
+        });
+
+        currentUnit = {
+          id: docId,
+          unitEmail: 'primarycareunit.ubuh@ubu.ac.th',
+          unitName: 'โรงพยาบาลมหาวิทยาลัยอุบลราชธานี',
+          district: 'วารินชำราบ',
+          province: 'อุบลราชธานี',
+          scores: initialScores,
+          notes: initialNotes,
+          evaluated: {},
+          updatedAt: new Date().toISOString()
+        };
+        await saveAssessment(currentUnit);
+      }
+      
+      setActiveUnit(currentUnit);
+      setAllUnitsList([currentUnit]);
+      await reloadFilesList(currentUnit.id);
+    } catch (err) {
+      console.error("Failed loading data for year", year, err);
+    } finally {
+      setSessionLoading(false);
+    }
+  };
 
   // 1. Subscribe to all assessments (supervisor/guest view) - Restricted to the single unified hospital dataset
   useEffect(() => {
@@ -249,54 +345,12 @@ export default function App() {
     setSessionLoading(true);
     setAuthError('');
     setSessionRole(info.role);
-    
-    // Force all accounts to use the single central database instance of Ubon Ratchathani University Hospital
-    const HOSPITAL_DOC_ID = 'primarycareunit_ubuh_ubu_ac_th';
-    const docId = HOSPITAL_DOC_ID;
 
     try {
-      const existing = await getAssessment(docId);
-      if (existing) {
-        setActiveUnit(existing);
-        await reloadFilesList(existing.id);
-      } else {
-        // Build empty state for the central hospital record
-        const initialScores: Record<string, number> = {};
-        const initialNotes: Record<string, string> = {};
-        ASSESSMENT_ITEMS.forEach(it => {
-          initialScores[it.id] = 0;
-          initialNotes[it.id] = '';
-        });
-
-        const freshUnit: AssessmentData = {
-          id: HOSPITAL_DOC_ID,
-          unitEmail: 'primarycareunit.ubuh@ubu.ac.th',
-          unitName: 'โรงพยาบาลมหาวิทยาลัยอุบลราชธานี',
-          district: 'วารินชำราบ',
-          province: 'อุบลราชธานี',
-          scores: initialScores,
-          notes: initialNotes,
-          evaluated: {},
-          updatedAt: new Date().toISOString()
-        };
-        await saveAssessment(freshUnit);
-        setActiveUnit(freshUnit);
-        setEvidenceFiles([]);
-      }
-
-      // Populate list with the single hospital unit for display and compatibility
-      const currentUnit = existing || {
-        id: HOSPITAL_DOC_ID,
-        unitEmail: 'primarycareunit.ubuh@ubu.ac.th',
-        unitName: 'โรงพยาบาลมหาวิทยาลัยอุบลราชธานี',
-        district: 'วารินชำราบ',
-        province: 'อุบลราชธานี',
-        scores: {},
-        notes: {},
-        evaluated: {},
-        updatedAt: new Date().toISOString()
-      };
-      setAllUnitsList([currentUnit]);
+      // Dynamically load data based on calculated current fiscal year B.E.
+      const currentYearBE = getCurrentThaiFiscalYear();
+      setFiscalYear(currentYearBE);
+      await loadYearData(currentYearBE);
       
       setCurrentUserInfo({ email: info.email, displayName: info.displayName, name: info.name, role: info.role });
       
@@ -342,12 +396,12 @@ export default function App() {
   const handleRefreshSupervisorData = async () => {
     setCloudStatus('syncing');
     try {
-      const HOSPITAL_DOC_ID = 'primarycareunit_ubuh_ubu_ac_th';
-      const singleUnit = await getAssessment(HOSPITAL_DOC_ID);
+      const docId = getAssessmentDocId(fiscalYear);
+      const singleUnit = await getAssessment(docId);
       if (singleUnit) {
         setActiveUnit(singleUnit);
         setAllUnitsList([singleUnit]);
-        await reloadFilesList(HOSPITAL_DOC_ID);
+        await reloadFilesList(docId);
       }
       if (currentUserInfo?.email === 'primarycareunit.ubuh@ubu.ac.th' || currentUserInfo?.role === 'admin') {
         await reloadActivityLogs();
@@ -589,11 +643,26 @@ export default function App() {
           >
             <div className="space-y-4 z-10 w-full md:w-auto">
               <div className="flex items-center gap-2 flex-wrap">
-                <span className="bg-gradient-to-r from-teal-500 to-emerald-400 text-white rounded-full px-4 py-1.5 text-[11px] font-bold leading-normal uppercase shadow-sm">
-                  ประจำปี พ.ศ. 2569
-                </span>
+                <div className="flex items-center gap-1.5 bg-gradient-to-r from-teal-500 to-emerald-400 hover:from-teal-600 hover:to-emerald-500 text-white rounded-full px-4 py-1.5 text-[11px] font-black leading-none uppercase shadow-sm transition">
+                  <Clock className="h-3.5 w-3.5 text-white/90" />
+                  <span>ปีงบประมาณ พ.ศ.</span>
+                  <select
+                    value={fiscalYear}
+                    onChange={(e) => {
+                      const selected = Number(e.target.value);
+                      setFiscalYear(selected);
+                      loadYearData(selected);
+                    }}
+                    className="bg-transparent border-none text-white font-black opacity-100 focus:outline-none focus:ring-0 cursor-pointer text-[11px] p-0 ml-1 select-none pr-1 inline-block"
+                    style={{ colorScheme: 'dark' }}
+                  >
+                    {availableYears.map(year => (
+                      <option key={year} value={year} className="text-slate-800">พ.ศ. {year}</option>
+                    ))}
+                  </select>
+                </div>
                 <span className="bg-slate-800 text-white rounded-full px-4 py-1.5 text-[11px] font-bold leading-normal shadow-sm">
-                  เกณฑ์รอบปี พ.ศ. 2568 - 2570
+                  เกณฑ์รอบประเมินปี พ.ศ. {fiscalYear - 1} - {fiscalYear + 1}
                 </span>
                 <span className="text-[11px] text-teal-700 font-bold bg-teal-50 border border-teal-100/50 px-4 py-1.5 rounded-full">
                   โรงพยาบาลมหาวิทยาลัยอุบลราชธานี
@@ -656,6 +725,15 @@ export default function App() {
             <div className="flex items-center gap-3 flex-wrap z-10 w-full md:w-auto">
               {(currentUserInfo?.email === 'primarycareunit.ubuh@ubu.ac.th' || currentUserInfo?.role === 'admin') && (
                 <>
+                  <motion.button
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                    onClick={() => setShowCriteriaManagement(true)}
+                    className="inline-flex items-center gap-2 h-14 rounded-full border-2 border-emerald-100 bg-emerald-50 hover:bg-emerald-100 px-6 text-[15px] font-bold text-emerald-700 shadow-[0_4px_15px_rgb(0,0,0,0.03)] hover:shadow-[0_4px_15px_rgb(0,0,0,0.06)] transition-all cursor-pointer animate-fade-in"
+                  >
+                    <Sparkles className="h-4 w-4" />
+                    <span>จัดการเกณฑ์ & ปีงบประมาณ</span>
+                  </motion.button>
                   <motion.button
                     whileHover={{ scale: 1.02 }}
                     whileTap={{ scale: 0.98 }}
@@ -1072,6 +1150,21 @@ export default function App() {
               <UserManagementModal 
                 currentUserEmail={currentUserInfo.email}
                 onClose={() => setShowUserManagement(false)}
+              />
+            )}
+          </AnimatePresence>
+
+          {/* Admin Criteria Management Modal */}
+          <AnimatePresence>
+            {(currentUserInfo?.email === 'primarycareunit.ubuh@ubu.ac.th' || currentUserInfo?.role === 'admin') && showCriteriaManagement && (
+              <CriteriaManagementModal 
+                currentUserEmail={currentUserInfo.email}
+                currentActiveYear={fiscalYear}
+                onClose={() => setShowCriteriaManagement(false)}
+                onCriteriaSaved={async (updatedYear) => {
+                  setShowCriteriaManagement(false);
+                  await loadYearData(updatedYear);
+                }}
               />
             )}
           </AnimatePresence>

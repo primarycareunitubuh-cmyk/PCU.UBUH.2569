@@ -10,6 +10,7 @@ import {
 } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { db, storage, handleFirestoreError, OperationType } from './firebase';
+import { PartInfo, AssessmentItem } from './data';
 
 export interface AssessmentData {
   id: string; // Sanitized email
@@ -113,9 +114,10 @@ export async function uploadEvidenceFile(
     });
 
     const base64Data = dataUrl.split(',')[1];
+    const folderYear = getYearFromAssessmentId(assessmentId);
 
     // 2. Upload file directly to the user's Google Apps Script Web App (safely bypassing CORS Preflight OPTIONS)
-    const scriptUrl = 'https://script.google.com/macros/s/AKfycbyg3RnjjnGzUmNHQY95PgsR1ZUgeKalTcb0FMMWuly9fD-G1o-DIQXT_7aevrHB9jMZPg/exec';
+    const scriptUrl = 'https://script.google.com/macros/s/AKfycbxk4jUPpFbVdhOowjyS9PhYOw_WU7GLUP1MeBKsbnIwkXWY0Ddd5fJdh3sra-aKyQfr/exec';
 
     const response = await fetch(scriptUrl, {
       method: 'POST',
@@ -131,7 +133,11 @@ export async function uploadEvidenceFile(
         base64: base64Data,
         data: base64Data,
         assessmentId: assessmentId,
-        itemId: itemId
+        itemId: itemId,
+        year: folderYear,
+        fiscalYear: folderYear,
+        folderYear: folderYear,
+        yearFolderName: `ปีงบประมาณ ${folderYear}`
       })
     });
 
@@ -361,5 +367,101 @@ export async function getActivityLogs(): Promise<ActivityLog[]> {
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, 'activity_logs');
     return [];
+  }
+}
+
+/**
+ * Calculates Buddhist Year from Assessment Document ID
+ */
+export function getYearFromAssessmentId(assessmentId: string): number {
+  if (assessmentId === 'primarycareunit_ubuh_ubu_ac_th') return 2569;
+  const match = assessmentId.match(/_(\d{4})$/);
+  if (match) {
+    return parseInt(match[1]);
+  }
+  return 2569; // Default fallback is 2569
+}
+
+/**
+ * Automatically calculates current Thai Fiscal Year (October 1st is start of new FY)
+ * Convert to B.E. (Buddhist Era)
+ */
+export function getCurrentThaiFiscalYear(): number {
+  const now = new Date();
+  const yearAD = now.getFullYear();
+  const month = now.getMonth() + 1; // 1-indexed (Jan is 1, Oct is 10)
+  const fiscalYearAD = month >= 10 ? yearAD + 1 : yearAD;
+  return fiscalYearAD + 543; // to B.E.
+}
+
+/**
+ * Loads dynamic evaluation criteria (Parts and Items) for a specific Fiscal Year
+ */
+export async function getFiscalYearCriteria(year: number): Promise<{ parts: PartInfo[]; items: AssessmentItem[] } | null> {
+  const docRef = doc(db, 'criteria_by_year', String(year));
+  try {
+    const docSnap = await getDoc(docRef);
+    if (docSnap.exists()) {
+      const data = docSnap.data();
+      return {
+        parts: data.parts || [],
+        items: data.items || []
+      };
+    }
+    return null;
+  } catch (error) {
+    console.error(`Failed to load criteria for fiscal year ${year}:`, error);
+    return null;
+  }
+}
+
+/**
+ * Saves dynamic evaluation criteria for a specific Fiscal Year in Firestore
+ */
+export async function saveFiscalYearCriteria(
+  year: number,
+  parts: PartInfo[],
+  items: AssessmentItem[],
+  updatedBy: string
+): Promise<void> {
+  const docRef = doc(db, 'criteria_by_year', String(year));
+  try {
+    await setDoc(docRef, {
+      year,
+      parts,
+      items,
+      updatedAt: new Date().toISOString(),
+      updatedBy
+    });
+  } catch (error) {
+    console.error(`Failed to save criteria for fiscal year ${year}:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Retrieves all registered Fiscal Years from criteria collection
+ */
+export async function getAvailableFiscalYears(): Promise<number[]> {
+  const colRef = collection(db, 'criteria_by_year');
+  try {
+    const qSnap = await getDocs(colRef);
+    const years: number[] = [];
+    qSnap.forEach(docSnap => {
+      const y = parseInt(docSnap.id);
+      if (!isNaN(y)) {
+        years.push(y);
+      }
+    });
+    
+    // Always include current fiscal year B.E. 2569 if not yet present
+    if (!years.includes(2569)) {
+      years.push(2569);
+    }
+    
+    return years.sort((a, b) => b - a); // descending
+  } catch (error) {
+    console.error("Failed to query criteria years list:", error);
+    return [2569];
   }
 }
