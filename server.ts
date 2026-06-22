@@ -98,31 +98,15 @@ async function startServer() {
         partNumber: currentPartNum
       });
 
-      // 1. Send the initial POST request with manual redirect handling to bypass default fetch redirect conversion (302 conversion from POST to GET)
-      let response = await fetch(scriptUrl, {
+      // Send the POST request. Google Apps Script automatically coordinates with a 302 Found redirect,
+      // which standard Node fetch (redirect: 'follow') follows automatically.
+      const response = await fetch(scriptUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'text/plain;charset=utf-8'
         },
-        body: requestBody,
-        redirect: 'manual'
+        body: requestBody
       });
-
-      console.log(`[ProxyUpload] Initial request status: ${response.status}`);
-
-      // 2. If it redirects (typically 302 Found), follow the redirect using a GET request (Apps Script echo endpoint only supports GET)
-      if (response.status === 301 || response.status === 302 || response.status === 307 || response.status === 308) {
-        const redirectUrl = response.headers.get('location');
-        if (redirectUrl) {
-          console.log(`[ProxyUpload] Manually redirecting with GET to: ${redirectUrl}`);
-          response = await fetch(redirectUrl, {
-            method: 'GET'
-          });
-          console.log(`[ProxyUpload] Redirected request status: ${response.status}`);
-        } else {
-          console.error(`[ProxyUpload] Redirect status ${response.status} met but no Location header found.`);
-        }
-      }
 
       if (!response.ok) {
         console.error(`[ProxyUpload] Google Apps Script returned status ${response.status}`);
