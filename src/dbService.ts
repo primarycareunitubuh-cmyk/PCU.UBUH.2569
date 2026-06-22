@@ -129,36 +129,83 @@ export async function uploadEvidenceFile(
     const itemFolderName = `ข้อ ${itemCode}`; // e.g. "ข้อ 1.1"
     const fullItemFolderName = `ข้อ ${itemCode} ${itemName}`.substring(0, 120);
 
-    // 2. Upload file via our Server Proxy API endpoint to completely avoid client CORS / local firewall blocks
-    const response = await fetch('/api/proxy-upload', {
+    // 2. Upload file directly to the user's Google Apps Script Web App (safely bypassing CORS Preflight OPTIONS)
+    // Add query parameters for e.parameter-based scripts in addition to JSON body-based scripts
+    const baseUrl = 'https://script.google.com/macros/s/AKfycbzB0xAgBngYtD7ptUSh1FQ6Na364rHPOTrBcg4TtAT4gBhWaEnrOzSUYg7iwBiGY_JWcw/exec';
+    const queryParams = new URL(baseUrl);
+    queryParams.searchParams.set('filename', name);
+    queryParams.searchParams.set('fileName', name);
+    queryParams.searchParams.set('name', name);
+    queryParams.searchParams.set('type', type);
+    queryParams.searchParams.set('mimeType', type);
+    queryParams.searchParams.set('assessmentId', assessmentId);
+    queryParams.searchParams.set('itemId', itemId);
+    queryParams.searchParams.set('year', String(folderYear));
+    queryParams.searchParams.set('fiscalYear', String(folderYear));
+    queryParams.searchParams.set('folderYear', String(folderYear));
+    queryParams.searchParams.set('yearFolderName', `ปีงบประมาณ ${folderYear}`);
+    
+    // Add criteria parameters for subfolder generation
+    queryParams.searchParams.set('partFolderName', partFolderName);
+    queryParams.searchParams.set('itemFolderName', itemFolderName);
+    queryParams.searchParams.set('fullItemFolderName', fullItemFolderName);
+    queryParams.searchParams.set('partName', partName);
+    queryParams.searchParams.set('itemCode', itemCode);
+    queryParams.searchParams.set('itemName', itemName);
+    queryParams.searchParams.set('partNumber', String(currentPartNum));
+
+    const scriptUrl = queryParams.toString();
+
+    const response = await fetch(scriptUrl, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'text/plain;charset=utf-8' // text/plain ensures browser handles this as a Simple Request, avoiding preflight rejection by script URL
       },
       body: JSON.stringify({
-        name,
-        type,
-        base64Data,
-        assessmentId,
-        itemId,
-        folderYear,
+        // File Name variations
+        filename: name,
+        fileName: name,
+        name: name,
+        file_name: name,
+        title: name,
+
+        // Mime Type variations
+        mimeType: type,
+        mimetype: type,
+        type: type,
+        contentType: type,
+
+        // File Content variations
+        file: base64Data,
+        base64: base64Data,
+        data: base64Data,
+        content: base64Data,
+        contents: base64Data,
+
+        // Year metadata parameters
+        assessmentId: assessmentId,
+        itemId: itemId,
+        year: folderYear,
+        fiscalYear: folderYear,
+        folderYear: folderYear,
+        yearFolderName: `ปีงบประมาณ ${folderYear}`,
+
+        // Criteria details parameters
         partFolderName,
         itemFolderName,
         fullItemFolderName,
         partName,
         itemCode,
         itemName,
-        currentPartNum
+        partNumber: currentPartNum
       })
     });
 
     if (!response.ok) {
-      const errJson = await response.json().catch(() => ({}));
-      throw new Error(errJson.error || `เซิร์ฟเวอร์อัปโหลดตอบกลับข้อผิดพลาดรหัส: ${response.status}`);
+      throw new Error(`Google Apps Script responded with code: ${response.status}`);
     }
 
-    const resData = await response.json();
-    const resText = resData.text || '';
+    const resText = await response.text();
     let uploadUrl = '';
 
     try {
