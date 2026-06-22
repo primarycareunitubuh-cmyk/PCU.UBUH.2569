@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import * as mammoth from 'mammoth';
+import imageCompression from 'browser-image-compression';
 import { AssessmentItem } from '../data';
 
 function base64ToArrayBuffer(base64: string): ArrayBuffer {
@@ -138,13 +139,41 @@ export default function ItemEvaluationModal({
                        fileTypeLower.includes('msword') ||
                        fileTypeLower.includes('office');
 
+    // 1. If it's a Google Drive URL, convert to embeddable preview and exit (bypassing Mammoth and base64 fetch)
+    const isGoogleDrive = previewFile.data.startsWith('http') && (
+      previewFile.data.includes('drive.google.com') || 
+      previewFile.data.includes('docs.google.com')
+    );
+
+    if (isGoogleDrive) {
+      let embedUrl = previewFile.data;
+      if (!embedUrl.includes('/preview')) {
+        const fileIdMatch = embedUrl.match(/\/file\/d\/([a-zA-Z0-9-_]+)/);
+        if (fileIdMatch && fileIdMatch[1]) {
+          embedUrl = `https://drive.google.com/file/d/${fileIdMatch[1]}/preview`;
+        } else {
+          const idMatch = embedUrl.match(/[?&]id=([a-zA-Z0-9-_]+)/);
+          if (idMatch && idMatch[1]) {
+            embedUrl = `https://drive.google.com/file/d/${idMatch[1]}/preview`;
+          }
+        }
+      }
+      setPreviewBlobUrl(embedUrl);
+      return;
+    }
+
     // Set up native Blob URL for secure, sandboxed PDF rendering
     let blobUrl = '';
     try {
-      const mimeType = isPdfFile ? 'application/pdf' : previewFile.type;
-      const blob = base64ToBlob(previewFile.data, mimeType);
-      blobUrl = URL.createObjectURL(blob);
-      setPreviewBlobUrl(blobUrl);
+      if (previewFile.data.startsWith('http')) {
+        blobUrl = previewFile.data;
+        setPreviewBlobUrl(blobUrl);
+      } else {
+        const mimeType = isPdfFile ? 'application/pdf' : previewFile.type;
+        const blob = base64ToBlob(previewFile.data, mimeType);
+        blobUrl = URL.createObjectURL(blob);
+        setPreviewBlobUrl(blobUrl);
+      }
     } catch (e) {
       console.error("Failed to build file blob URL:", e);
     }
@@ -155,9 +184,15 @@ export default function ItemEvaluationModal({
 
       const runMammoth = async () => {
         try {
-          const base64Parts = previewFile.data.split(',');
-          const base64Data = base64Parts[1] || base64Parts[0];
-          const arrayBuffer = base64ToArrayBuffer(base64Data);
+          let arrayBuffer: ArrayBuffer;
+          if (previewFile.data.startsWith('http')) {
+            const res = await fetch(previewFile.data);
+            arrayBuffer = await res.arrayBuffer();
+          } else {
+            const base64Parts = previewFile.data.split(',');
+            const base64Data = base64Parts[1] || base64Parts[0];
+            arrayBuffer = base64ToArrayBuffer(base64Data);
+          }
           
           const result = await mammoth.convertToHtml({ arrayBuffer: arrayBuffer });
           if (result.value) {
@@ -296,55 +331,57 @@ export default function ItemEvaluationModal({
     setErrorMsg('');
     setSuccessMsg('');
 
-    // Check size limit: 10MB (Chunked Firestore uploads)
-    const LIMIT_BYTES = 10 * 1024 * 1024;
-    if (file.size > LIMIT_BYTES) {
-      setErrorMsg(`ไฟล์ "${file.name}" มีขนาดเกินเกณฑ์ 10MB (ขนาดปัจจุบัน: ${(file.size / (1024 * 1024)).toFixed(2)} MB) กรุณาใช้ไฟล์ที่มีขนาดเล็กลง`);
-      return;
-    }
-
     setIsUploading(true);
     try {
-      // FileReader to Base64 String
-      const reader = new FileReader();
-      reader.onload = async (e) => {
-        const base64Data = e.target?.result as string;
-        if (!base64Data) {
-          setErrorMsg('ไม่สามารถอ่านข้อมูลไบนารีจากไฟล์นี้ได้');
-          setIsUploading(false);
-          return;
-        }
+      let finalFile: File | Blob = file;
 
+      // Image Compression logic
+      if (file.type.startsWith('image/')) {
+        const options = {
+          maxSizeMB: 1, // Compress limit to 1MB
+          maxWidthOrHeight: 1920,
+          useWebWorker: true,
+          fileType: file.type // Keep original file type
+        };
         try {
-          // Upload metadata & data URI to dbService
-          await uploadEvidenceFile(assessmentId, item.id, file.name, file.type, file.size, base64Data);
-          
-          try {
-            await logActivity(
-              currentUserEmail,
-              currentUserDisplayName,
-              currentUserName,
-              'upload_file',
-              `อัปโหลดไฟล์หลักฐาน "${file.name}" (${(file.size / (1024 * 1024)).toFixed(2)} MB)`,
-              item.id,
-              item.code,
-              item.name
-            );
-          } catch (logErr) {
-            console.error("Failed to log activity:", logErr);
-          }
-
-          setSuccessMsg(`อัปโหลดไฟล์หลักฐาน "${file.name}" ข้อมูลถูกอัปเดตลง Firestore เรียบร้อยแล้ว!`);
-          onFilesChanged();
-        } catch (err: any) {
-          setErrorMsg(err?.message || 'ไม่สามารถเชื่อมต่อ Firestore มั่นใจคลาวด์ออนไลน์');
-        } finally {
-          setIsUploading(false);
+          finalFile = await imageCompression(file, options);
+          console.log(`Image compressed from ${file.size / 1024 / 1024} MB to ${finalFile.size / 1024 / 1024} MB`);
+        } catch (compErr) {
+          console.warn("Image compression failed, using original file.", compErr);
         }
-      };
-      reader.readAsDataURL(file);
-    } catch (err) {
-      setErrorMsg('เกิดปัญหาในการประมวลผลไฟล์ภายในเครื่อง');
+      }
+
+      // Check size limit: 10MB 
+      const LIMIT_BYTES = 10 * 1024 * 1024;
+      if (finalFile.size > LIMIT_BYTES) {
+        setErrorMsg(`ไฟล์ "${file.name}" มีขนาดเกินเกณฑ์ 10MB (ขนาด: ${(finalFile.size / (1024 * 1024)).toFixed(2)} MB) กรุณาใช้วิธีอัปโหลดไฟล์ที่เล็กลง หรือแนบเป็นลิงก์ (เช่น Google Drive, OneDrive) แทนครับ`);
+        setIsUploading(false);
+        return;
+      }
+
+      // Upload file directly to Storage 
+      await uploadEvidenceFile(assessmentId, item.id, finalFile, file.name, file.type, finalFile.size);
+      
+      try {
+        await logActivity(
+          currentUserEmail,
+          currentUserDisplayName,
+          currentUserName,
+          'upload_file',
+          `อัปโหลดไฟล์หลักฐาน "${file.name}" (${(finalFile.size / (1024 * 1024)).toFixed(2)} MB)`,
+          item.id,
+          item.code,
+          item.name
+        );
+      } catch (logErr) {
+        console.error("Failed to log activity:", logErr);
+      }
+
+      setSuccessMsg(`อัปโหลดไฟล์หลักฐาน "${file.name}" สำเร็จเรียบร้อยแล้ว!`);
+      onFilesChanged();
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'ไม่สามารถอัปโหลดไฟล์ได้ กรุณาลองใหม่อีกครั้ง');
+    } finally {
       setIsUploading(false);
     }
   };
@@ -418,9 +455,14 @@ export default function ItemEvaluationModal({
 
       const mimeType = isPdf ? 'application/pdf' : fileType;
 
-      // Convert Base64 data to native Blob Object URL
-      const blob = base64ToBlob(fileData.data, mimeType);
-      const blobUrl = URL.createObjectURL(blob);
+      let blobUrl = '';
+      if (fileData.data.startsWith('http')) {
+        blobUrl = fileData.data;
+      } else {
+        // Convert Base64 data to native Blob Object URL
+        const blob = base64ToBlob(fileData.data, mimeType);
+        blobUrl = URL.createObjectURL(blob);
+      }
 
       if (isPdf || isImage) {
         const win = window.open(blobUrl, '_blank');
@@ -441,9 +483,15 @@ export default function ItemEvaluationModal({
       let wordContentHtml = '';
       if (isWord) {
         try {
-          const base64Parts = fileData.data.split(',');
-          const base64Data = base64Parts[1] || base64Parts[0];
-          const arrayBuffer = base64ToArrayBuffer(base64Data);
+          let arrayBuffer: ArrayBuffer;
+          if (fileData.data.startsWith('http')) {
+            const res = await fetch(fileData.data);
+            arrayBuffer = await res.arrayBuffer();
+          } else {
+            const base64Parts = fileData.data.split(',');
+            const base64Data = base64Parts[1] || base64Parts[0];
+            arrayBuffer = base64ToArrayBuffer(base64Data);
+          }
           const result = await mammoth.convertToHtml({ arrayBuffer: arrayBuffer });
           wordContentHtml = result.value || '<p class="text-slate-500 italic">ไม่มีเนื้อหาที่สามารถแสดงในไฟล์นี้ได้ หรือไฟล์อยู่ในรูปแบบเก่า (.doc)</p>';
         } catch (err) {
@@ -735,19 +783,32 @@ export default function ItemEvaluationModal({
       return;
     }
     try {
-      let base64Data = '';
+      let fileDataString = '';
       let fileType = file.type;
+      
       if ('data' in file) {
-        base64Data = file.data;
+        fileDataString = file.data;
       } else {
         const full = await getEvidenceFileContent(assessmentId, file.id);
         if (!full) throw new Error('Empty file content');
-        base64Data = full.data;
+        fileDataString = full.data;
         fileType = full.type;
       }
 
-      // Convert Base64 data to native Blob Object URL
-      const blob = base64ToBlob(base64Data, fileType);
+      // If it is a Firebase Storage URL (starts with http)
+      if (fileDataString.startsWith('http')) {
+        const link = document.createElement('a');
+        link.href = fileDataString;
+        link.download = file.name;
+        link.target = "_blank"; // In case it opens in new tab instead of download directly due to CORS
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        return;
+      }
+
+      // If it is a legacy Base64 string
+      const blob = base64ToBlob(fileDataString, fileType);
       const blobUrl = URL.createObjectURL(blob);
 
       const link = document.createElement('a');
@@ -1160,8 +1221,45 @@ export default function ItemEvaluationModal({
                   </button>
                 </div>
 
-                <div className="flex items-center justify-center bg-white p-4 rounded-lg border border-slate-100 max-h-[650px] overflow-auto w-full">
-                  {isPreviewImage ? (
+                <div className="flex items-center justify-center bg-white p-4 rounded-lg border border-slate-100 max-h-[1000px] overflow-auto w-full">
+                  {previewFile.data.startsWith('http') && (previewFile.data.includes('drive.google.com') || previewFile.data.includes('docs.google.com')) ? (
+                    <div className="w-full flex flex-col items-center gap-4 text-center">
+                      <div className="bg-emerald-50 border border-emerald-200/60 rounded-2xl p-5 mb-1.5 w-full text-left font-sans">
+                        <div className="flex items-start gap-3">
+                          <span className="text-2xl mt-0.5">☁️</span>
+                          <div>
+                            <h4 className="text-sm font-bold text-emerald-850 leading-normal font-sans">
+                              เอกสารแนบหลักฐานในระบบ Google Drive ส่วนกลาง
+                            </h4>
+                            <p className="text-xs text-emerald-700 mt-1.5 leading-relaxed font-sans">
+                              เอกสารถูกจัดเก็บและคุ้มครองอย่างปลอดภัยอยู่ในโฟลเดอร์ Google Drive ของหน่วยงานหลักโดยตรง ระบบแสดงผลพรีวิวผ่านเบราว์เซอร์ของทาน (หากหน้าต่างพรีวิวไม่แสดงผลหรือขึ้นคำค้นหาจำกัดสิทธิ์ในเฟรม ท่านสามารถคลิกเข้าชมด้วยปุ่มขนาดใหญ่ด้านล่างเพื่อเปิดแท็บใหม่ได้ทันที)
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+
+                      {previewBlobUrl ? (
+                        <div className="w-full rounded-xl overflow-hidden border border-slate-200 shadow-inner bg-slate-100">
+                          <iframe 
+                            src={previewBlobUrl} 
+                            title={previewFile.name}
+                            className="w-full h-[550px] border-0"
+                            allow="autoplay"
+                          />
+                        </div>
+                      ) : null}
+
+                      <div className="flex flex-wrap gap-3 justify-center mt-2">
+                        <button
+                          onClick={() => handleOpenInNewWindow(previewFile)}
+                          className="text-xs inline-flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-3 rounded-xl shadow-md font-bold transition hover:-translate-y-0.5 active:translate-y-0 cursor-pointer"
+                        >
+                          <ExternalLink className="h-4 w-4" />
+                          <span>เปิดดูเอกสารตัวเต็มใน Google Drive (แท็บใหม่)</span>
+                        </button>
+                      </div>
+                    </div>
+                  ) : isPreviewImage ? (
                     <img 
                       src={previewFile.data} 
                       alt={previewFile.name} 

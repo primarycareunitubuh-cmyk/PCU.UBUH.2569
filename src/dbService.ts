@@ -8,7 +8,8 @@ import {
   query, 
   where 
 } from 'firebase/firestore';
-import { db, handleFirestoreError, OperationType } from './firebase';
+import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
+import { db, storage, handleFirestoreError, OperationType } from './firebase';
 
 export interface AssessmentData {
   id: string; // Sanitized email
@@ -29,6 +30,8 @@ export interface EvidenceFileMeta {
   type: string;
   size: number;
   uploadedAt: string;
+  url?: string;
+  storagePath?: string;
 }
 
 export interface EvidenceFileData extends EvidenceFileMeta {
@@ -88,75 +91,119 @@ export async function getAllAssessments(): Promise<AssessmentData[]> {
 }
 
 /**
- * Saves an evidence file in the subcollection of an assessment with chunking support
+ * Saves an evidence file to Google Drive via Google Apps Script and its metadata to Firestore
  */
 export async function uploadEvidenceFile(
   assessmentId: string, 
   itemId: string, 
+  file: File | Blob, 
   name: string, 
   type: string, 
-  size: number, 
-  base64Data: string
+  size: number
 ): Promise<EvidenceFileMeta> {
   const fileId = `${itemId}_${Date.now()}`;
-  const fileRef = doc(db, 'assessments', assessmentId, 'files', fileId);
-  
-  // Create File Metadata Document (Omit heavy 'data' field to keep it under 1MB)
-  const fileDocMeta = {
-    id: fileId,
-    itemId,
-    name,
-    type,
-    size,
-    uploadedAt: new Date().toISOString()
-  };
 
   try {
-    // 1. Write the metadata document first
-    await setDoc(fileRef, fileDocMeta);
+    // 1. Convert file to Base64 String
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
 
-    // 2. Chop base64Data into chunks and save them in parallel
-    const chunkSize = 500 * 1024; // 500KB chunks
-    const uploadPromises: Promise<void>[] = [];
-    
-    for (let i = 0; i < base64Data.length; i += chunkSize) {
-      const chunkStr = base64Data.substring(i, i + chunkSize);
-      const chunkIndex = Math.floor(i / chunkSize);
-      const chunkRef = doc(db, 'assessments', assessmentId, 'files', fileId, 'chunks', String(chunkIndex));
-      
-      uploadPromises.push(setDoc(chunkRef, {
-        index: chunkIndex,
-        data: chunkStr
-      }));
+    const base64Data = dataUrl.split(',')[1];
+
+    // 2. Upload file directly to the user's Google Apps Script Web App (safely bypassing CORS Preflight OPTIONS)
+    const scriptUrl = 'https://script.google.com/macros/s/AKfycbyg3RnjjnGzUmNHQY95PgsR1ZUgeKalTcb0FMMWuly9fD-G1o-DIQXT_7aevrHB9jMZPg/exec';
+
+    const response = await fetch(scriptUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8' // text/plain ensures browser handles this as a Simple Request, avoiding preflight rejection by script URL
+      },
+      body: JSON.stringify({
+        file: base64Data,
+        filename: name,
+        mimeType: type,
+        name: name,
+        type: type,
+        base64: base64Data,
+        data: base64Data,
+        assessmentId: assessmentId,
+        itemId: itemId
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Google Apps Script responded with code: ${response.status}`);
     }
 
-    await Promise.all(uploadPromises);
+    const resText = await response.text();
+    let uploadUrl = '';
 
-    return {
-      ...fileDocMeta
+    try {
+      const resJson = JSON.parse(resText);
+      uploadUrl = resJson.url || resJson.link || resJson.fileUrl || resJson.webViewLink || '';
+      if (!uploadUrl && resJson.id) {
+        uploadUrl = `https://drive.google.com/file/d/${resJson.id}/view?usp=drivesdk`;
+      }
+    } catch {
+      if (resText.trim().startsWith('http')) {
+        uploadUrl = resText.trim();
+      }
+    }
+
+    if (!uploadUrl) {
+      throw new Error(`อัปโหลดสำเร็จแต่ไม่ได้รับลิงก์ Google Drive กลับคืนมา (คำตอบจากสคริปต์: ${resText.substring(0, 100)})`);
+    }
+
+    // 3. Create File Metadata Document in Firestore
+    const fileRef = doc(db, 'assessments', assessmentId, 'files', fileId);
+    const fileDocMeta: EvidenceFileMeta = {
+      id: fileId,
+      itemId,
+      name,
+      type,
+      size,
+      uploadedAt: new Date().toISOString(),
+      url: uploadUrl,
+      storagePath: `google-drive://${fileId}` // Marked with custom scheme so we skip Firebase Storage deletion
     };
+    
+    await setDoc(fileRef, fileDocMeta);
+
+    return fileDocMeta;
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `assessments/${assessmentId}/files/${fileId}`);
+    handleFirestoreError(error, OperationType.WRITE, `google_drive_via_apps_script`);
     throw error;
   }
 }
 
 /**
- * Retreives full file details (including Base64) to trigger downloads/previews
+ * Retreives full file details (including Base64 or URL) to trigger downloads/previews
  */
 export async function getEvidenceFileContent(assessmentId: string, fileId: string): Promise<EvidenceFileData | null> {
   const fileRef = doc(db, 'assessments', assessmentId, 'files', fileId);
   try {
     const docSnap = await getDoc(fileRef);
     if (docSnap.exists()) {
-      const fileData = docSnap.data() as Record<string, any>;
+      const fileData = docSnap.data() as EvidenceFileData;
       
+      // NEW BEHAVIOR: Use Firebase Storage URL directly for data view
+      if (fileData.url) {
+        return {
+          ...fileData,
+          data: fileData.url
+        };
+      }
+
       // Backward compatibility: If file was uploaded with old code where 'data' is a direct string:
       if (typeof fileData.data === 'string' && fileData.data) {
-        return fileData as EvidenceFileData;
+        return fileData;
       }
       
-      // Fetch and assemble the chunks
+      // Backward compatibility: Fetch and assemble the chunks
       const chunksColRef = collection(db, 'assessments', assessmentId, 'files', fileId, 'chunks');
       const chunkSnaps = await getDocs(chunksColRef);
       const chunksList: { index: number; data: string }[] = [];
@@ -171,17 +218,11 @@ export async function getEvidenceFileContent(assessmentId: string, fileId: strin
         }
       });
       
-      // Sort and stitch chunks
       chunksList.sort((a, b) => a.index - b.index);
       const fullBase64 = chunksList.map(c => c.data).join('');
       
       return {
-        id: fileData.id,
-        itemId: fileData.itemId,
-        name: fileData.name,
-        type: fileData.type,
-        size: fileData.size,
-        uploadedAt: fileData.uploadedAt,
+        ...fileData,
         data: fullBase64
       } as EvidenceFileData;
     }
@@ -209,7 +250,9 @@ export async function getEvidenceFileList(assessmentId: string): Promise<Evidenc
         name: data.name,
         type: data.type,
         size: data.size,
-        uploadedAt: data.uploadedAt
+        uploadedAt: data.uploadedAt,
+        url: data.url,
+        storagePath: data.storagePath
       });
     });
     return files;
@@ -220,15 +263,28 @@ export async function getEvidenceFileList(assessmentId: string): Promise<Evidenc
 }
 
 /**
- * Deletes a file document by ID and cleans up its chunk subcolleciton
+ * Deletes a file document by ID, cleans up Firebase Storage object if exists, 
+ * or cleans up legacy chunk subcolleciton
  */
 export async function deleteEvidenceFile(assessmentId: string, fileId: string): Promise<void> {
   const fileRef = doc(db, 'assessments', assessmentId, 'files', fileId);
   try {
-    // 1. Delete parent document
+    const docSnap = await getDoc(fileRef);
+    if (!docSnap.exists()) return;
+    
+    const fileMeta = docSnap.data() as EvidenceFileMeta;
+
+    // 1. Delete parent document from Firestore
     await deleteDoc(fileRef);
     
-    // 2. Fetch and delete all chunks in its subcollection
+    // 2a. Delete from Firebase Storage (New Files)
+    if (fileMeta.storagePath && !fileMeta.storagePath.startsWith('google-drive://')) {
+      const storageRef = ref(storage, fileMeta.storagePath);
+      await deleteObject(storageRef).catch(e => console.error("Firebase Storage delete failed for", fileMeta.storagePath, e));
+      return;
+    }
+
+    // 2b. Fetch and delete all chunks in its subcollection (Legacy Files)
     const chunksColRef = collection(db, 'assessments', assessmentId, 'files', fileId, 'chunks');
     const chunkSnaps = await getDocs(chunksColRef);
     const deletePromises: Promise<void>[] = [];
