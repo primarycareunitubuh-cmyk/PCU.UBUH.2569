@@ -1,45 +1,78 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Default Deny catch-all
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email != null;
+    }
+
+    function userEmail() {
+      return request.auth.token.email.lower();
+    }
+
+    function isRootAdmin() {
+      return isSignedIn() && userEmail() == 'primarycareunit.ubuh@ubu.ac.th';
+    }
+
+    function isRegisteredUser() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/authorized_users/$(userEmail()));
+    }
+
+    function userRole() {
+      return get(/databases/$(database)/documents/authorized_users/$(userEmail())).data.role;
+    }
+
+    function isAuthorized() {
+      return isRootAdmin() || isRegisteredUser();
+    }
+
+    function isAdmin() {
+      return isRootAdmin() || (isRegisteredUser() && userRole() == 'admin');
+    }
+
+    function isEditorOrAdmin() {
+      return isRootAdmin() || (isRegisteredUser() && (userRole() == 'editor' || userRole() == 'admin'));
+    }
+
+    // 1. Assessments & attached file metadata
+    match /assessments/{assessmentId} {
+      allow read: if isAuthorized();
+      allow write: if isEditorOrAdmin();
+
+      match /files/{fileId} {
+        allow read: if isAuthorized();
+        allow write: if isEditorOrAdmin();
+
+        match /chunks/{chunkId} {
+          allow read: if isAuthorized();
+          allow write: if isEditorOrAdmin();
+        }
+      }
+    }
+
+    // 2. Authorized Users (อ่านได้เฉพาะข้อมูลตัวเอง หรือ Admin อ่าน/แก้ทั้งหมด)
+    match /authorized_users/{emailId} {
+      allow get: if isSignedIn() && (userEmail() == emailId || isAdmin());
+      allow list, create, update, delete: if isAdmin();
+    }
+
+    // 3. Activity Logs (ผู้มีสิทธิ์อ่านได้, Editor/Admin สร้าง Log ได้ แต่ห้ามแก้ไข/ลบย้อนหลัง)
+    match /activity_logs/{logId} {
+      allow read: if isAuthorized();
+      allow create: if isEditorOrAdmin();
+      allow update, delete: if isAdmin();
+    }
+
+    // 4. Criteria by Year (ผู้มีสิทธิ์อ่านได้, Admin แก้ไขเกณฑ์ได้)
+    match /criteria_by_year/{yearId} {
+      allow read: if isAuthorized();
+      allow write: if isAdmin();
+    }
+
+    // Default Deny
     match /{document=**} {
       allow read, write: if false;
-    }
-
-    // Assessments collection
-    match /assessments/{assessmentId} {
-      allow read, write: if true;
-
-      match /{allChildren=**} {
-        allow read, write: if true;
-      }
-    }
-
-    // Authorized Users collection
-    match /authorized_users/{userId} {
-      allow read, write: if true;
-
-      match /{allChildren=**} {
-        allow read, write: if true;
-      }
-    }
-
-    // Activity logs collection for audit trail
-    match /activity_logs/{logId} {
-      allow read, write: if true;
-
-      match /{allChildren=**} {
-        allow read, write: if true;
-      }
-    }
-
-    // Criteria by Year collection
-    match /criteria_by_year/{yearId} {
-      allow read, write: if true;
-
-      match /{allChildren=**} {
-        allow read, write: if true;
-      }
     }
   }
 }
