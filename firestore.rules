@@ -35,7 +35,7 @@ service cloud.firestore {
       return isRootAdmin() || (isRegisteredUser() && (userRole() == 'editor' || userRole() == 'admin'));
     }
 
-    // 1. Assessments & attached file metadata
+    // ข้อมูลการประเมินและไฟล์แนบ
     match /assessments/{assessmentId} {
       allow read: if isAuthorized();
       allow write: if isEditorOrAdmin();
@@ -51,26 +51,27 @@ service cloud.firestore {
       }
     }
 
-    // 2. Authorized Users (อ่านได้เฉพาะข้อมูลตัวเอง หรือ Admin อ่าน/แก้ทั้งหมด)
+    // รายชื่อผู้มีสิทธิ์ใช้งาน (อ่านได้เฉพาะของตัวเอง หรือ Admin จัดการทั้งหมด)
     match /authorized_users/{emailId} {
       allow get: if isSignedIn() && (userEmail() == emailId || isAdmin());
       allow list, create, update, delete: if isAdmin();
     }
 
-    // 3. Activity Logs (ผู้มีสิทธิ์อ่านได้, Editor/Admin สร้าง Log ได้ แต่ห้ามแก้ไข/ลบย้อนหลัง)
+    // ประวัติการแก้ไข
     match /activity_logs/{logId} {
       allow read: if isAuthorized();
       allow create: if isEditorOrAdmin();
       allow update, delete: if isAdmin();
     }
 
-    // 4. Criteria by Year (ผู้มีสิทธิ์อ่านได้, Admin แก้ไขเกณฑ์ได้)
+    // เกณฑ์การประเมินรายปี
     match /criteria_by_year/{yearId} {
       allow read: if isAuthorized();
-      allow write: if isAdmin();
+      allow create: if isEditorOrAdmin();
+      allow update, delete: if isAdmin();
     }
 
-    // Default Deny
+    // ปิดสิทธิ์ทุกอย่างที่ไม่ได้ระบุไว้
     match /{document=**} {
       allow read, write: if false;
     }
