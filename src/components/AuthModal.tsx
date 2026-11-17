@@ -3,7 +3,7 @@ import { Database, ShieldCheck, Mail, Building, Eye, Users, Lock, LogIn } from '
 import { motion, AnimatePresence } from 'motion/react';
 import { auth, db, firebaseConfig } from '../firebase';
 import { GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
-import { collection, query, where, getDocs } from 'firebase/firestore';
+import { doc, getDoc } from 'firebase/firestore';
 import { HOSPITAL_LOGO_BASE64 } from '../config';
 
 interface AuthModalProps {
@@ -46,23 +46,22 @@ export default function AuthModal({ onConfirm, isLoading, externalError }: AuthM
       const result = await signInWithPopup(auth, provider);
       const user = result.user;
       
-      const q = query(collection(db, 'authorized_users'), where('email', '==', user.email?.toLowerCase()));
-      const querySnapshot = await getDocs(q);
+const userEmailLower = (user.email || '').toLowerCase();
+ const userDocSnap = await getDoc(doc(db, 'authorized_users', userEmailLower));
 
-      if (querySnapshot.empty && user.email?.toLowerCase() !== 'primarycareunit.ubuh@ubu.ac.th') {
-         await signOut(auth);
-         setError('อีเมลของท่านไม่ได้รับอนุญาตให้เข้าถึงข้อมูล กรุณาติดต่อเจ้าหน้าที่');
-         setIsGoogleLoading(false);
-         return;
-      }
+ if (!userDocSnap.exists() && userEmailLower !== 'primarycareunit.ubuh@ubu.ac.th') {
+    await signOut(auth);
+    setError('อีเมลของท่านไม่ได้รับอนุญาตให้เข้าถึงข้อมูล กรุณาติดต่อเจ้าหน้าที่');
+    setIsGoogleLoading(false);
+    return;
+ }
 
-      let assignedRole: 'editor' | 'supervisor' | 'admin' = 'editor';
-      if (!querySnapshot.empty) {
-        assignedRole = querySnapshot.docs[0].data().role;
-      } else if (user.email?.toLowerCase() === 'primarycareunit.ubuh@ubu.ac.th') {
-        assignedRole = 'admin';
-      }
-
+ let assignedRole: 'editor' | 'supervisor' | 'admin' = 'editor';
+ if (userDocSnap.exists()) {
+   assignedRole = userDocSnap.data().role;
+ } else if (userEmailLower === 'primarycareunit.ubuh@ubu.ac.th') {
+   assignedRole = 'admin';
+ }
       onConfirm({ 
         email: user.email!, 
         displayName: user.displayName || undefined,
