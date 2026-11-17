@@ -64,12 +64,12 @@ export default function UserManagementModal({ onClose, currentUserEmail }: UserM
     try {
       // Use email as document ID or auto ID. Let's use auto ID for simplicity, but email is better to avoid dupes? 
       // Firestore `addDoc` uses auto-id. Let's use auto-id.
-      await addDoc(collection(db, 'authorized_users'), {
-        email: email,
-        role: newRole,
-        addedAt: new Date().toISOString(),
-        addedBy: currentUserEmail
-      });
+await setDoc(doc(db, 'authorized_users', email), {
+     email: email,
+     role: newRole,
+     addedAt: new Date().toISOString(),
+     addedBy: currentUserEmail
+   });
       setNewEmail('');
       await loadUsers();
     } catch (err: any) {
